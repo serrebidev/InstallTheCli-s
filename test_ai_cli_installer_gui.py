@@ -453,6 +453,8 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("--no-update-notifier", script)
         self.assertIn("install <target>", script)
         self.assertIn("setup-cron", script)
+        self.assertIn('install -g "${candidate}@latest"', script)
+        self.assertIn("if (( DRY_RUN )); then", script)
 
         with open(script_path, "rb") as f:
             raw = f.read()
@@ -468,6 +470,13 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("install <target>", script)
         self.assertIn("setup-updater", script)
         self.assertIn("--no-update-notifier", script)
+        self.assertIn("if (-not $DryRun)", script)
+        self.assertIn("Get-NpmPath", script)
+        self.assertIn('i -g ("$pkg@latest")', script)
+        self.assertIn("one_click_update_windows.vbs", script)
+        self.assertIn("New-ScheduledTaskAction -Execute 'wscript.exe'", script)
+        self.assertIn("bundle\\gemini.js", script)
+        self.assertIn("dist\\index.js", script)
 
 
 class RegistryAndWindowsTests(unittest.TestCase):
@@ -1379,12 +1388,13 @@ class CommandAndDetectionTests(unittest.TestCase):
 
 
 class AutoUpdateSchedulerTests(unittest.TestCase):
-    def test_build_cli_auto_update_script_uses_npm_update_and_suppresses_output(self) -> None:
+    def test_build_cli_auto_update_script_installs_latest_and_suppresses_output(self) -> None:
         script = m.build_cli_auto_update_script(
             r"C:\Program Files\nodejs\npm.cmd",
             r"C:\Users\Admin\AppData\Local\InstallTheCli\auto_update_packages.txt",
         )
-        self.assertIn("$npm = 'C:\\Program Files\\nodejs\\npm.cmd'", script)
+        self.assertIn("$configuredNpm = 'C:\\Program Files\\nodejs\\npm.cmd'", script)
+        self.assertIn("$npm = Get-NpmPath $configuredNpm", script)
         self.assertIn("$npmDir = Split-Path -Parent $npm", script)
         self.assertIn("$env:npm_config_update_notifier = 'false'", script)
         self.assertIn("$packagesFile =", script)
@@ -1392,8 +1402,36 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
         self.assertIn("'--no-audit'", script)
         self.assertIn("'--no-update-notifier'", script)
         self.assertIn("'--loglevel' 'error'", script)
+        self.assertIn("foreach ($pkg in $packages)", script)
         self.assertIn("$null = & $npm", script)
-        self.assertIn("'update' '-g' @packages *>&1", script)
+        self.assertIn("'i' '-g'", script)
+        self.assertIn('"$pkg@latest"', script)
+        self.assertIn("function Get-NpmPath", script)
+        self.assertIn("nodejs\\npm.cmd", script)
+        # Gemini shim regen guarded on @google/gemini-cli being in the package set
+        self.assertIn("$packages -contains '@google/gemini-cli'", script)
+        self.assertIn("Set-Content -LiteralPath (Join-Path $npmBin 'gemini.cmd')", script)
+        self.assertIn("bundle\\gemini.js", script)
+        self.assertIn("dist\\index.js", script)
+        self.assertIn("GEMINI_ENTRY", script)
+        self.assertIn("gemini.ps1", script)
+
+    def test_build_cli_auto_update_vbs_runs_powershell_hidden(self) -> None:
+        vbs = m.build_cli_auto_update_vbs(
+            r"C:\Users\Admin\AppData\Local\InstallTheCli\auto_update_clis.ps1"
+        )
+        self.assertIn("CreateObject(\"WScript.Shell\")", vbs)
+        self.assertIn("powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File", vbs)
+        self.assertIn(r"C:\Users\Admin\AppData\Local\InstallTheCli\auto_update_clis.ps1", vbs)
+        # WshShell.Run(..., 0, False) -> 0 means "hide window", False means "don't wait"
+        self.assertIn(", 0, False", vbs)
+        # Embedded path quotes must be VBScript-doubled, not raw `"`
+        self.assertIn('""', vbs)
+
+    def test_build_cli_auto_update_vbs_escapes_double_quotes_in_path(self) -> None:
+        # VBScript escape for `"` inside a string literal is `""`
+        vbs = m.build_cli_auto_update_vbs(r'C:\weird"path\auto.ps1')
+        self.assertIn(r'C:\weird""path\auto.ps1', vbs)
 
     def test_ensure_cli_auto_update_task_skips_when_no_packages(self) -> None:
         logs: list[str] = []
@@ -1430,14 +1468,22 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
             self.assertEqual(merged, ["@openai/codex", "@vibe-kit/grok-cli"])
             packages_path = os.path.join(tmp_dir, m.AUTO_UPDATE_PACKAGES_FILE)
             script_path = os.path.join(tmp_dir, m.AUTO_UPDATE_SCRIPT_FILE)
+            vbs_path = os.path.join(tmp_dir, m.AUTO_UPDATE_VBS_FILE)
             self.assertTrue(os.path.isfile(packages_path))
             self.assertTrue(os.path.isfile(script_path))
+            self.assertTrue(os.path.isfile(vbs_path))
             self.assertEqual(m.read_nonempty_lines(packages_path), merged)
 
             with open(script_path, "r", encoding="utf-8") as f:
                 script_text = f.read()
-            self.assertIn("update' '-g'", script_text)
-            self.assertIn("@packages", script_text)
+            self.assertIn("'i' '-g'", script_text)
+            self.assertIn("$pkg@latest", script_text)
+
+            with open(vbs_path, "r", encoding="utf-8") as f:
+                vbs_text = f.read()
+            self.assertIn("WScript.Shell", vbs_text)
+            self.assertIn(script_path.replace('"', '""'), vbs_text)
+            self.assertIn(", 0, False", vbs_text)
 
             run_args = run_mock.call_args.args[0]
             task_command = run_args[-1]
@@ -1445,7 +1491,12 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
             self.assertIn("New-ScheduledTaskTrigger -AtStartup", task_command)
             self.assertIn("New-ScheduledTaskTrigger -AtLogOn", task_command)
             self.assertIn("New-ScheduledTaskTrigger -Daily -At '3:00AM'", task_command)
-            self.assertIn("-WindowStyle Hidden", task_command)
+            # Task action should now invoke wscript.exe against the .vbs wrapper.
+            self.assertIn("New-ScheduledTaskAction -Execute 'wscript.exe'", task_command)
+            self.assertIn("//nologo", task_command)
+            self.assertIn(m.AUTO_UPDATE_VBS_FILE, task_command)
+            self.assertNotIn("powershell.exe' -Argument", task_command)
+            self.assertNotIn("-WindowStyle Hidden", task_command)
             self.assertIn("New-ScheduledTaskSettingsSet -Hidden", task_command)
             self.assertIn("-LogonType Interactive", task_command)
             self.assertNotIn("InteractiveToken", task_command)

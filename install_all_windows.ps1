@@ -66,6 +66,7 @@ $AutoUpdateTaskName = 'InstallTheCli - Update AI CLIs'
 $LocalAppDataRoot = if ($env:LocalAppData) { $env:LocalAppData } else { Join-Path $HOME 'AppData\Local' }
 $SupportDir = Join-Path $LocalAppDataRoot 'InstallTheCli'
 $AutoUpdateScriptPath = Join-Path $SupportDir 'one_click_update_windows.ps1'
+$AutoUpdateVbsPath = Join-Path $SupportDir 'one_click_update_windows.vbs'
 $NpmFlags = @('--no-fund', '--no-audit', '--no-update-notifier', '--loglevel', 'error')
 $PipFlags = @('--disable-pip-version-check', '--no-input', '--quiet')
 
@@ -314,38 +315,58 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $NpmFlags = @("--no-fund","--no-audit","--no-update-notifier","--loglevel","error")
 $PipFlags = @("--disable-pip-version-check","--no-input","--quiet")
-$NpmPackages = @(
-  "@anthropic-ai/claude-code",
-  "@openai/codex",
-  "@google/gemini-cli",
-  "@vibe-kit/grok-cli",
-  "@qwen-code/qwen-code",
-  "qwen-code",
-  "@github/copilot",
-  "@githubnext/github-copilot-cli",
-  "openclaw",
-  "ironclaw"
-)
 
 function Test-Cmd([string]$Name) { return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue) }
-function Get-NpmCmd() { return Get-Command npm -ErrorAction SilentlyContinue }
-$npmCmd = Get-NpmCmd
-if ($npmCmd) {
-  $npmDir = Split-Path -Parent $npmCmd.Source
+function Get-NpmPath() {
+  $cmd = Get-Command npm -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
+  $candidates = @()
+  if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles "nodejs\npm.cmd") }
+  $pf86 = ${env:ProgramFiles(x86)}
+  if ($pf86) { $candidates += (Join-Path $pf86 "nodejs\npm.cmd") }
+  foreach ($candidate in $candidates) {
+    if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+  }
+  return $null
+}
+$npmPath = Get-NpmPath
+if ($npmPath) {
+  $npmDir = Split-Path -Parent $npmPath
   if ($npmDir) { $env:PATH = $npmDir + ';' + [string]$env:PATH }
 }
 $env:npm_config_update_notifier = 'false'
+
+# `npm i -g <pkg>@latest` is more reliable than `npm update -g`, which can
+# leave packages stale when their dist-tag pinning is unusual (codex / claude
+# both showed this in practice).
 function Update-NpmCli([string[]]$Candidates) {
-  if (-not $npmCmd) { return }
+  if (-not $npmPath) { return }
   foreach ($pkg in $Candidates) {
-    & $npmCmd.Source list -g --depth=0 $pkg *> $null
+    & $npmPath list -g --depth=0 $pkg *> $null
     if ($LASTEXITCODE -ne 0) { continue }
-    & $npmCmd.Source @NpmFlags update -g $pkg *>&1 | Out-Null
+    & $npmPath @NpmFlags i -g ("$pkg@latest") *>&1 | Out-Null
     return
   }
 }
 
-if ($npmCmd) {
+# Re-emit the gemini shim. Gemini's npm shim can break when the package layout
+# under node_modules/@google changes between versions; rewriting it after each
+# update keeps the `gemini` command working.
+function Repair-GeminiShim() {
+  if (-not $npmPath) { return }
+  try {
+    $npmBin = (& $npmPath prefix -g 2>$null)
+    if (-not $npmBin) { return }
+    $npmBin = $npmBin.Trim()
+    if (-not (Test-Path -LiteralPath $npmBin)) { return }
+    $cmd = "@ECHO off`r`nGOTO start`r`n:find_dp0`r`nSET dp0=%~dp0`r`nEXIT /b`r`n:start`r`nSETLOCAL`r`nCALL :find_dp0`r`n`r`nSET `"GEMINI_ENTRY=`"`r`nIF EXIST `"%dp0%node_modules\@google\gemini-cli\bundle\gemini.js`" (`r`n  SET `"GEMINI_ENTRY=%dp0%node_modules\@google\gemini-cli\bundle\gemini.js`"`r`n) ELSE IF EXIST `"%dp0%node_modules\@google\gemini-cli\dist\index.js`" (`r`n  SET `"GEMINI_ENTRY=%dp0%node_modules\@google\gemini-cli\dist\index.js`"`r`n) ELSE (`r`n  for /d %%D in (`"%dp0%node_modules\@google\.gemini-cli-*`") do (`r`n    IF EXIST `"%%~fD\bundle\gemini.js`" (`r`n      SET `"GEMINI_ENTRY=%%~fD\bundle\gemini.js`"`r`n      GOTO found`r`n    )`r`n    IF EXIST `"%%~fD\dist\index.js`" (`r`n      SET `"GEMINI_ENTRY=%%~fD\dist\index.js`"`r`n      GOTO found`r`n    )`r`n  )`r`n)`r`n`r`n:found`r`nIF NOT DEFINED GEMINI_ENTRY (`r`n  ECHO Gemini CLI package not found under `"%dp0%node_modules\@google`" 1>&2`r`n  EXIT /b 1`r`n)`r`n`r`nIF EXIST `"%dp0%node.exe`" (`r`n  SET `"_prog=%dp0%node.exe`"`r`n) ELSE (`r`n  SET `"_prog=node`"`r`n  SET PATHEXT=%PATHEXT:;.JS;=;%`r`n)`r`n`r`nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & `"%_prog%`"  `"%GEMINI_ENTRY%`" %*`r`n"
+    Set-Content -LiteralPath (Join-Path $npmBin 'gemini.cmd') -Value $cmd -Encoding ASCII
+    $ps1Shim = Join-Path $npmBin 'gemini.ps1'
+    if (Test-Path -LiteralPath $ps1Shim) { Remove-Item -LiteralPath $ps1Shim -Force -ErrorAction SilentlyContinue }
+  } catch { }
+}
+
+if ($npmPath) {
   Update-NpmCli @("@anthropic-ai/claude-code")
   Update-NpmCli @("@openai/codex")
   Update-NpmCli @("@google/gemini-cli")
@@ -354,6 +375,7 @@ if ($npmCmd) {
   Update-NpmCli @("@github/copilot","@githubnext/github-copilot-cli")
   Update-NpmCli @("openclaw")
   Update-NpmCli @("ironclaw")
+  Repair-GeminiShim
 }
 
 if (Test-Cmd "py") {
@@ -385,8 +407,14 @@ function Ensure-HiddenAutoUpdateTask {
     New-Item -ItemType Directory -Force -Path $SupportDir | Out-Null
     Set-Content -LiteralPath $AutoUpdateScriptPath -Value (Build-WindowsUpdaterScript) -Encoding UTF8
 
-    $actionArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$AutoUpdateScriptPath`""
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $actionArgs
+    # VBS wrapper -> powershell ensures the updater never flashes a console
+    # window. `powershell -WindowStyle Hidden` directly is not actually hidden
+    # at logon on some Windows builds.
+    $vbsBody = "Set WshShell = CreateObject(`"WScript.Shell`")`r`nWshShell.Run `"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"`"$AutoUpdateScriptPath`"`"`", 0, False`r`n"
+    Set-Content -LiteralPath $AutoUpdateVbsPath -Value $vbsBody -Encoding ASCII
+
+    $actionArgs = "`"$AutoUpdateVbsPath`" //nologo"
+    $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument $actionArgs
     $triggerStartup = New-ScheduledTaskTrigger -AtStartup
     $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
     $triggerDaily = New-ScheduledTaskTrigger -Daily -At $AutoUpdateTime
@@ -478,7 +506,9 @@ function Main {
         default { }
     }
 
-    Require-Admin
+    if (-not $DryRun) {
+        Require-Admin
+    }
     Write-Log 'Windows one-click AI CLI installer started.'
     Write-Log "Subcommand: $normalizedCommand"
     if ($normalizedCommand -eq 'install') { Write-Log "Target: $normalizedTarget" }

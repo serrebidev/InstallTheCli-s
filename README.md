@@ -162,6 +162,8 @@ Behavior:
 - hidden task
 - runs at startup, logon, and daily
 - no popup console window
+- invokes a small `.vbs` wrapper through `wscript.exe`, which launches the PowerShell updater hidden
+- npm CLIs are refreshed with `npm install -g <package>@latest`
 
 Files written under:
 - `%LocalAppData%\InstallTheCli\`
@@ -176,6 +178,7 @@ Files:
 Behavior:
 - runs on reboot and daily
 - non-interactive cron job
+- npm CLIs are refreshed with `npm install -g <package>@latest`
 
 ## Build From Source (Windows)
 

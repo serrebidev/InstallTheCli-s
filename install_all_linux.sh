@@ -112,6 +112,9 @@ run_shell() {
 }
 
 require_root() {
+  if (( DRY_RUN )); then
+    return 0
+  fi
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     die "Run this script as root (or with sudo)."
   fi
@@ -430,7 +433,7 @@ update_npm_cli() {
     if ! npm_package_installed "$candidate"; then
       continue
     fi
-    if run_cmd npm "${NPM_FLAGS[@]}" update -g "$candidate"; then
+    if run_cmd npm "${NPM_FLAGS[@]}" install -g "${candidate}@latest"; then
       log "Updated ${label} via ${candidate}"
       return 0
     fi

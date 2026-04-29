@@ -33,6 +33,8 @@ AUTO_UPDATE_DAILY_TIME = "3:00AM"
 AUTO_UPDATE_DIR_NAME = "InstallTheCli"
 AUTO_UPDATE_PACKAGES_FILE = "auto_update_packages.txt"
 AUTO_UPDATE_SCRIPT_FILE = "auto_update_clis.ps1"
+AUTO_UPDATE_VBS_FILE = "auto_update_clis.vbs"
+GEMINI_NPM_PACKAGE = "@google/gemini-cli"
 GUI_LAST_RUN_LOG_FILE = "gui_last_run.log"
 NPM_INSTALL_MAX_ATTEMPTS = 3
 NPM_INSTALL_RETRY_DELAY_SECONDS = 2.0
@@ -520,23 +522,74 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
     npm_quiet_args = " ".join(
         powershell_single_quote(flag) for flag in NPM_QUIET_FLAGS
     )
+    gemini_pkg_literal = powershell_single_quote(GEMINI_NPM_PACKAGE)
     lines = [
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
-        f"$npm = {powershell_single_quote(npm_exe)}",
+        "function Get-NpmPath([string]$ConfiguredNpm) {",
+        "  if ($ConfiguredNpm -and (Test-Path -LiteralPath $ConfiguredNpm)) { return $ConfiguredNpm }",
+        "  $cmd = Get-Command npm -ErrorAction SilentlyContinue",
+        "  if ($cmd) { return $cmd.Source }",
+        "  $candidates = @()",
+        "  if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles 'nodejs\\npm.cmd') }",
+        "  $pf86 = ${env:ProgramFiles(x86)}",
+        "  if ($pf86) { $candidates += (Join-Path $pf86 'nodejs\\npm.cmd') }",
+        "  foreach ($candidate in $candidates) {",
+        "    if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }",
+        "  }",
+        "  return $null",
+        "}",
+        f"$configuredNpm = {powershell_single_quote(npm_exe)}",
+        "$npm = Get-NpmPath $configuredNpm",
+        "if (-not $npm) { exit 0 }",
         "$npmDir = Split-Path -Parent $npm",
         "if ($npmDir) { $env:PATH = $npmDir + ';' + [string]$env:PATH }",
         "$env:npm_config_update_notifier = 'false'",
         f"$packagesFile = {powershell_single_quote(packages_file)}",
-        "if (-not (Test-Path -LiteralPath $npm)) { exit 0 }",
         "if (-not (Test-Path -LiteralPath $packagesFile)) { exit 0 }",
         "$packages = Get-Content -LiteralPath $packagesFile -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() } | Where-Object { $_ }",
         "if (-not $packages -or $packages.Count -eq 0) { exit 0 }",
-        f"$null = & $npm {npm_quiet_args} 'update' '-g' @packages *>&1",
-        "if ($LASTEXITCODE -is [int]) { exit $LASTEXITCODE }",
+        # Per-package install of @latest: more reliable than `npm update -g`,
+        # which can leave packages stale if their dist-tag pinning is odd
+        # (codex / claude both exhibited this; the user's hand-rolled task
+        # runs `npm i -g <pkg>@latest` per package and behaves correctly).
+        "foreach ($pkg in $packages) {",
+        f"  $null = & $npm {npm_quiet_args} 'i' '-g' (\"$pkg@latest\") *>&1",
+        "}",
+        # Re-emit the gemini shim if @google/gemini-cli is in the package set.
+        # Gemini's npm shim can break across versions when the package layout
+        # under node_modules/@google changes; rewriting the shim each run keeps
+        # the `gemini` command working regardless.
+        f"if ($packages -contains {gemini_pkg_literal}) {{",
+        "  try {",
+        "    $npmBin = & $npm prefix -g 2>$null",
+        "    if ($npmBin) { $npmBin = $npmBin.Trim() }",
+        "    if ($npmBin -and (Test-Path -LiteralPath $npmBin)) {",
+        "      $geminiCmd = \"@ECHO off`r`nGOTO start`r`n:find_dp0`r`nSET dp0=%~dp0`r`nEXIT /b`r`n:start`r`nSETLOCAL`r`nCALL :find_dp0`r`n`r`nSET `\"GEMINI_ENTRY=`\"`r`nIF EXIST `\"%dp0%node_modules\\@google\\gemini-cli\\bundle\\gemini.js`\" (`r`n  SET `\"GEMINI_ENTRY=%dp0%node_modules\\@google\\gemini-cli\\bundle\\gemini.js`\"`r`n) ELSE IF EXIST `\"%dp0%node_modules\\@google\\gemini-cli\\dist\\index.js`\" (`r`n  SET `\"GEMINI_ENTRY=%dp0%node_modules\\@google\\gemini-cli\\dist\\index.js`\"`r`n) ELSE (`r`n  for /d %%D in (`\"%dp0%node_modules\\@google\\.gemini-cli-*`\") do (`r`n    IF EXIST `\"%%~fD\\bundle\\gemini.js`\" (`r`n      SET `\"GEMINI_ENTRY=%%~fD\\bundle\\gemini.js`\"`r`n      GOTO found`r`n    )`r`n    IF EXIST `\"%%~fD\\dist\\index.js`\" (`r`n      SET `\"GEMINI_ENTRY=%%~fD\\dist\\index.js`\"`r`n      GOTO found`r`n    )`r`n  )`r`n)`r`n`r`n:found`r`nIF NOT DEFINED GEMINI_ENTRY (`r`n  ECHO Gemini CLI package not found under `\"%dp0%node_modules\\@google`\" 1>&2`r`n  EXIT /b 1`r`n)`r`n`r`nIF EXIST `\"%dp0%node.exe`\" (`r`n  SET `\"_prog=%dp0%node.exe`\"`r`n) ELSE (`r`n  SET `\"_prog=node`\"`r`n  SET PATHEXT=%PATHEXT:;.JS;=;%`r`n)`r`n`r`nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & `\"%_prog%`\"  `\"%GEMINI_ENTRY%`\" %*`r`n\"",
+        "      Set-Content -LiteralPath (Join-Path $npmBin 'gemini.cmd') -Value $geminiCmd -Encoding ASCII",
+        "      $ps1Shim = Join-Path $npmBin 'gemini.ps1'",
+        "      if (Test-Path -LiteralPath $ps1Shim) { Remove-Item -LiteralPath $ps1Shim -Force -ErrorAction SilentlyContinue }",
+        "    }",
+        "  } catch { }",
+        "}",
         "exit 0",
     ]
     return "\n".join(lines) + "\n"
+
+
+def build_cli_auto_update_vbs(script_path: str) -> str:
+    """Tiny VBScript wrapper that launches the PowerShell updater fully hidden.
+
+    `powershell.exe -WindowStyle Hidden` still flashes a console briefly on
+    some Windows builds; wscript.exe + WshShell.Run(..., 0, False) does not.
+    Mirrors the user's hand-rolled `update-codex-gemini.vbs` setup.
+    """
+    escaped = script_path.replace('"', '""')
+    return (
+        "Set WshShell = CreateObject(\"WScript.Shell\")\r\n"
+        "WshShell.Run \"powershell.exe -NoProfile -ExecutionPolicy Bypass "
+        "-WindowStyle Hidden -File \"\"" + escaped + "\"\"\", 0, False\r\n"
+    )
 
 
 def ensure_cli_auto_update_task(
@@ -557,17 +610,22 @@ def ensure_cli_auto_update_task(
 
     packages_file = os.path.join(support_dir, AUTO_UPDATE_PACKAGES_FILE)
     script_file = os.path.join(support_dir, AUTO_UPDATE_SCRIPT_FILE)
+    vbs_file = os.path.join(support_dir, AUTO_UPDATE_VBS_FILE)
 
     existing_packages = read_nonempty_lines(packages_file)
     merged_packages = dedupe_preserve_order(existing_packages + clean_packages)
 
     write_nonempty_lines(packages_file, merged_packages)
     write_text_file(script_file, build_cli_auto_update_script(npm_exe, packages_file))
+    write_text_file(vbs_file, build_cli_auto_update_vbs(script_file))
 
-    action_args = f'-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{script_file}"'
+    # Run the .vbs via wscript.exe so the PowerShell updater never flashes a
+    # console window. `powershell -WindowStyle Hidden` directly is not
+    # actually hidden on logon.
+    action_args = f'"{vbs_file}" //nologo'
     register_lines = [
         "$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name",
-        f"$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument {powershell_single_quote(action_args)}",
+        f"$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument {powershell_single_quote(action_args)}",
         "$triggerStartup = New-ScheduledTaskTrigger -AtStartup",
         "$triggerLogon = New-ScheduledTaskTrigger -AtLogOn",
         f"$triggerDaily = New-ScheduledTaskTrigger -Daily -At {powershell_single_quote(AUTO_UPDATE_DAILY_TIME)}",
