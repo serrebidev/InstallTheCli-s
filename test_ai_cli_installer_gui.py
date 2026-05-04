@@ -473,6 +473,9 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("if (-not $DryRun)", script)
         self.assertIn("Get-NpmPath", script)
         self.assertIn('i -g ("$pkg@latest")', script)
+        self.assertIn("Test-CodexCliRunning", script)
+        self.assertIn("Remove-CodexNpmTempDirs", script)
+        self.assertIn(".codex-*", script)
         self.assertIn("one_click_update_windows.vbs", script)
         self.assertIn("New-ScheduledTaskAction -Execute 'wscript.exe'", script)
         self.assertIn("bundle\\gemini.js", script)
@@ -1408,6 +1411,13 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
         self.assertIn('"$pkg@latest"', script)
         self.assertIn("function Get-NpmPath", script)
         self.assertIn("nodejs\\npm.cmd", script)
+        # Codex updates are skipped while Codex is active to avoid Windows
+        # locking codex.exe and leaving npm .codex-* temp directories behind.
+        self.assertIn("function Test-CodexCliRunning", script)
+        self.assertIn("function Remove-CodexNpmTempDirs", script)
+        self.assertIn("$pkg -eq '@openai/codex'", script)
+        self.assertIn(".codex-*", script)
+        self.assertIn("if (Test-CodexCliRunning) { continue }", script)
         # Gemini shim regen guarded on @google/gemini-cli being in the package set
         self.assertIn("$packages -contains '@google/gemini-cli'", script)
         self.assertIn("Set-Content -LiteralPath (Join-Path $npmBin 'gemini.cmd')", script)

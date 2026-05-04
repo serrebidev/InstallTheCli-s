@@ -164,6 +164,7 @@ Behavior:
 - no popup console window
 - invokes a small `.vbs` wrapper through `wscript.exe`, which launches the PowerShell updater hidden
 - npm CLIs are refreshed with `npm install -g <package>@latest`
+- Codex CLI updates are skipped while Codex is running, then retried on the next task run to avoid locked `codex.exe` cleanup warnings
 
 Files written under:
 - `%LocalAppData%\InstallTheCli\`

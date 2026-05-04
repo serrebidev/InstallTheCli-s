@@ -336,6 +336,40 @@ if ($npmPath) {
 }
 $env:npm_config_update_notifier = 'false'
 
+function Get-NpmPrefix {
+  try {
+    $prefix = & $npmPath prefix -g 2>$null
+    if ($prefix) { return $prefix.Trim() }
+  } catch { }
+  return $null
+}
+
+function Remove-CodexNpmTempDirs {
+  try {
+    $prefix = Get-NpmPrefix
+    if (-not $prefix) { return }
+    $openAiRoot = Join-Path (Join-Path $prefix 'node_modules') '@openai'
+    if (-not (Test-Path -LiteralPath $openAiRoot)) { return }
+    $rootFull = [System.IO.Path]::GetFullPath($openAiRoot).TrimEnd('\') + '\'
+    Get-ChildItem -LiteralPath $openAiRoot -Force -Directory -Filter '.codex-*' -ErrorAction SilentlyContinue | ForEach-Object {
+      $targetFull = [System.IO.Path]::GetFullPath($_.FullName)
+      $isSafeTarget = $targetFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase) -and $_.Name.StartsWith('.codex-', [System.StringComparison]::OrdinalIgnoreCase)
+      if ($isSafeTarget) { Remove-Item -LiteralPath $targetFull -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+  } catch { }
+}
+
+function Test-CodexCliRunning {
+  try {
+    $matches = Get-CimInstance Win32_Process -Filter "name = 'codex.exe' or name = 'node.exe'" -ErrorAction SilentlyContinue | Where-Object {
+      $_.Name -ieq 'codex.exe' -or ([string]$_.CommandLine) -match '\\@openai\\codex\\bin\\codex\.js'
+    } | Select-Object -First 1
+    return $null -ne $matches
+  } catch {
+    return $false
+  }
+}
+
 # `npm i -g <pkg>@latest` is more reliable than `npm update -g`, which can
 # leave packages stale when their dist-tag pinning is unusual (codex / claude
 # both showed this in practice).
@@ -344,7 +378,12 @@ function Update-NpmCli([string[]]$Candidates) {
   foreach ($pkg in $Candidates) {
     & $npmPath list -g --depth=0 $pkg *> $null
     if ($LASTEXITCODE -ne 0) { continue }
+    if ($pkg -eq '@openai/codex') {
+      Remove-CodexNpmTempDirs
+      if (Test-CodexCliRunning) { return }
+    }
     & $npmPath @NpmFlags i -g ("$pkg@latest") *>&1 | Out-Null
+    if ($pkg -eq '@openai/codex') { Remove-CodexNpmTempDirs }
     return
   }
 }

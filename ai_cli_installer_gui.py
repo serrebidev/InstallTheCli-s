@@ -34,6 +34,7 @@ AUTO_UPDATE_DIR_NAME = "InstallTheCli"
 AUTO_UPDATE_PACKAGES_FILE = "auto_update_packages.txt"
 AUTO_UPDATE_SCRIPT_FILE = "auto_update_clis.ps1"
 AUTO_UPDATE_VBS_FILE = "auto_update_clis.vbs"
+CODEX_NPM_PACKAGE = "@openai/codex"
 GEMINI_NPM_PACKAGE = "@google/gemini-cli"
 GUI_LAST_RUN_LOG_FILE = "gui_last_run.log"
 NPM_INSTALL_MAX_ATTEMPTS = 3
@@ -522,6 +523,7 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
     npm_quiet_args = " ".join(
         powershell_single_quote(flag) for flag in NPM_QUIET_FLAGS
     )
+    codex_pkg_literal = powershell_single_quote(CODEX_NPM_PACKAGE)
     gemini_pkg_literal = powershell_single_quote(GEMINI_NPM_PACKAGE)
     lines = [
         "$ErrorActionPreference = 'Stop'",
@@ -545,6 +547,37 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "$npmDir = Split-Path -Parent $npm",
         "if ($npmDir) { $env:PATH = $npmDir + ';' + [string]$env:PATH }",
         "$env:npm_config_update_notifier = 'false'",
+        "function Get-NpmPrefix {",
+        "  try {",
+        "    $prefix = & $npm prefix -g 2>$null",
+        "    if ($prefix) { return $prefix.Trim() }",
+        "  } catch { }",
+        "  return $null",
+        "}",
+        "function Remove-CodexNpmTempDirs {",
+        "  try {",
+        "    $prefix = Get-NpmPrefix",
+        "    if (-not $prefix) { return }",
+        "    $openAiRoot = Join-Path (Join-Path $prefix 'node_modules') '@openai'",
+        "    if (-not (Test-Path -LiteralPath $openAiRoot)) { return }",
+        "    $rootFull = [System.IO.Path]::GetFullPath($openAiRoot).TrimEnd('\\') + '\\'",
+        "    Get-ChildItem -LiteralPath $openAiRoot -Force -Directory -Filter '.codex-*' -ErrorAction SilentlyContinue | ForEach-Object {",
+        "      $targetFull = [System.IO.Path]::GetFullPath($_.FullName)",
+        "      $isSafeTarget = $targetFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase) -and $_.Name.StartsWith('.codex-', [System.StringComparison]::OrdinalIgnoreCase)",
+        "      if ($isSafeTarget) { Remove-Item -LiteralPath $targetFull -Recurse -Force -ErrorAction SilentlyContinue }",
+        "    }",
+        "  } catch { }",
+        "}",
+        "function Test-CodexCliRunning {",
+        "  try {",
+        "    $matches = Get-CimInstance Win32_Process -Filter \"name = 'codex.exe' or name = 'node.exe'\" -ErrorAction SilentlyContinue | Where-Object {",
+        "      $_.Name -ieq 'codex.exe' -or ([string]$_.CommandLine) -match '\\\\@openai\\\\codex\\\\bin\\\\codex\\.js'",
+        "    } | Select-Object -First 1",
+        "    return $null -ne $matches",
+        "  } catch {",
+        "    return $false",
+        "  }",
+        "}",
         f"$packagesFile = {powershell_single_quote(packages_file)}",
         "if (-not (Test-Path -LiteralPath $packagesFile)) { exit 0 }",
         "$packages = Get-Content -LiteralPath $packagesFile -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() } | Where-Object { $_ }",
@@ -554,7 +587,12 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         # (codex / claude both exhibited this; the user's hand-rolled task
         # runs `npm i -g <pkg>@latest` per package and behaves correctly).
         "foreach ($pkg in $packages) {",
+        f"  if ($pkg -eq {codex_pkg_literal}) {{",
+        "    Remove-CodexNpmTempDirs",
+        "    if (Test-CodexCliRunning) { continue }",
+        "  }",
         f"  $null = & $npm {npm_quiet_args} 'i' '-g' (\"$pkg@latest\") *>&1",
+        f"  if ($pkg -eq {codex_pkg_literal}) {{ Remove-CodexNpmTempDirs }}",
         "}",
         # Re-emit the gemini shim if @google/gemini-cli is in the package set.
         # Gemini's npm shim can break across versions when the package layout
