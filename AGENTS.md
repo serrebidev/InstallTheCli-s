@@ -4,11 +4,12 @@ This file is for coding agents working in this repo.
 
 ## What This Project Is
 
-Windows/Linux installer for common AI CLIs.
+Windows/macOS/Linux installer for common AI CLIs.
 
 Main entry points:
-- `ai_cli_installer_gui.py` (wxPython GUI; supports Windows and Linux)
+- `ai_cli_installer_gui.py` (wxPython GUI; supports Windows, macOS, and Linux)
 - `install_all_windows.ps1` (one-click PowerShell installer with subcommands/help)
+- `install_all_macos.sh` (one-click macOS Bash installer with subcommands/help + LaunchAgent updater)
 - `install_all_linux.sh` (one-click Linux installer with subcommands/help + cron updater)
 - `test_ai_cli_installer_gui.py` (unit tests; high coverage)
 - `build_exe.bat` + `InstallTheCli.spec` (Windows EXE build via PyInstaller)
@@ -36,6 +37,10 @@ Auto-update behavior:
 - Linux script: cron updater
   - `@reboot`
   - daily (`0 3 * * *` default)
+- macOS GUI / Bash script: user LaunchAgent (`com.installthecli.ai-cli-updates`)
+  - `RunAtLoad`
+  - daily (`StartInterval` 86400)
+  - updates installed Homebrew formulae/casks, and npm packages only if globally installed
 
 ## Hard Requirements / Invariants
 
@@ -60,14 +65,24 @@ Auto-update behavior:
 - Reference: `https://docs.mistral.ai/mistral-vibe/introduction`
 - Windows path uses Python `3.14` (install if needed) + `pip`/`uv`
 - Linux path supports Python `3.12+`, plus `pip`/`uv` (and handles PEP 668 via `--break-system-packages`)
+- macOS path uses the Homebrew formula `mistral-vibe`
 
-5. `install_all_linux.sh` must remain LF-only line endings.
+5. Keep macOS installs Homebrew-first unless an official installer is the only confirmed source.
+- The app must check for Homebrew. If missing, ask before installing it with the official Homebrew installer.
+- Known macOS CLI Homebrew casks: `claude-code`, `codex`, `copilot-cli`
+- Known macOS CLI Homebrew formulae: `gemini-cli`, `qwen-code`, `mistral-vibe`, `ollama`, `ironclaw`
+- Known macOS desktop casks: `claude`, `chatgpt`, `codex-app`, `google-gemini`
+- OpenClaw uses the official installer at `https://openclaw.ai/install.sh` and requires Node `22.14+` (or newer).
+- Grok currently uses npm package `@vibe-kit/grok-cli`; install Node through Homebrew when needed.
+
+6. `install_all_linux.sh` and `install_all_macos.sh` must remain LF-only line endings.
 - CRLF causes Bash errors (`$'\r': command not found`) when run on Linux.
 - If editing on Windows, normalize to LF before testing.
 
-6. Preserve hidden/background updater behavior.
+7. Preserve hidden/background updater behavior.
 - No visible cmd/PowerShell windows for auto-updates on Windows.
 - Cron script should remain non-interactive on Linux.
+- LaunchAgent script should remain non-interactive on macOS.
 
 ## Python / Build Version
 
@@ -99,6 +114,11 @@ If you change platform-specific behavior:
   - `./install_all_linux.sh help`
   - `./install_all_linux.sh list`
   - `./install_all_linux.sh install codex --dry-run --no-cron`
+- For macOS script changes, prefer:
+  - `bash -n install_all_macos.sh`
+  - `./install_all_macos.sh help`
+  - `./install_all_macos.sh list`
+  - `./install_all_macos.sh install codex --dry-run --no-launch-agent`
 
 ## Build Quality
 
@@ -131,6 +151,15 @@ Always fix any warnings, bugs, or errors that appear during a build before shipp
 - `help`
 - convenience alias: `./install_all_linux.sh codex`
 
+`install_all_macos.sh` should continue to support:
+- `install-all`
+- `install <target>`
+- `setup-launch-agent`
+- `list`
+- `help`
+- convenience alias: `./install_all_macos.sh codex`
+- Homebrew prompt before installing Homebrew when missing
+
 ## Packaging Notes
 
 `InstallTheCli.spec` is intentionally simple:
@@ -141,12 +170,13 @@ Auto-update scripts are generated at runtime under user/system state locations, 
 
 GitHub release expectations:
 - Release from `master`; `master` is the expected default branch.
-- Publish real releases, not draft releases.
+- Publish real releases, not draft releases. Never leave GitHub releases in draft state unless the user explicitly reverses this project preference.
 - Release assets should include:
   - `InstallTheCli-vX.Y.Z.exe`
   - `InstallTheCli-vX.Y.Z.zip`
   - `InstallTheCli-vX.Y.Z-SHA256SUMS.txt`
   - `install_all_windows.ps1`
+  - `install_all_macos.sh`
   - `install_all_linux.sh`
 
 ## If You Add A New CLI
@@ -156,7 +186,8 @@ Update all of these together:
 - install logic (if not plain npm)
 - desktop shortcut resolution rules if needed
 - auto-update (Windows + Linux one-click updater scripts, if applicable)
-- one-click scripts (`install_all_windows.ps1`, `install_all_linux.sh`)
+- auto-update (macOS LaunchAgent script, if applicable)
+- one-click scripts (`install_all_windows.ps1`, `install_all_macos.sh`, `install_all_linux.sh`)
 - tests in `test_ai_cli_installer_gui.py`
 - `README.md`
 

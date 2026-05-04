@@ -1,0 +1,98 @@
+name: macOS Build
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos-build:
+    name: Build & test (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller coverage
+
+      - name: Lint install_all_macos.sh
+        run: |
+          bash -n install_all_macos.sh
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck -S warning install_all_macos.sh || true
+          fi
+
+      - name: Validate macOS one-click script CLI surface
+        run: |
+          chmod +x install_all_macos.sh
+          ./install_all_macos.sh help
+          ./install_all_macos.sh list
+          ./install_all_macos.sh install codex --dry-run --no-launch-agent
+
+      - name: Run unit tests with coverage
+        run: |
+          python -m coverage run -m unittest -q test_ai_cli_installer_gui.py
+          python -m coverage report -m ai_cli_installer_gui.py test_ai_cli_installer_gui.py
+
+      - name: Build macOS binary with PyInstaller
+        run: |
+          python -m PyInstaller --clean --noconfirm --log-level ERROR InstallTheCli.spec
+
+      - name: Package macOS artifact
+        id: package
+        run: |
+          set -euo pipefail
+          cd dist
+          if [ -d InstallTheCli.app ]; then
+            ARTIFACT="InstallTheCli-macos.zip"
+            ditto -c -k --sequesterRsrc --keepParent InstallTheCli.app "$ARTIFACT"
+          elif [ -f InstallTheCli ]; then
+            ARTIFACT="InstallTheCli-macos.zip"
+            zip -q "$ARTIFACT" InstallTheCli
+          else
+            echo "ERROR: PyInstaller did not produce InstallTheCli.app or InstallTheCli." >&2
+            ls -la
+            exit 1
+          fi
+          shasum -a 256 "$ARTIFACT" > "${ARTIFACT%.zip}-SHA256SUMS.txt"
+          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload macOS build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: InstallTheCli-macos
+          path: |
+            dist/${{ steps.package.outputs.artifact }}
+            dist/InstallTheCli-macos-SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Attach macOS artifact to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          RELEASE_ZIP="dist/InstallTheCli-${TAG}-macos.zip"
+          RELEASE_SUMS="dist/InstallTheCli-${TAG}-macos-SHA256SUMS.txt"
+          mv "dist/${{ steps.package.outputs.artifact }}" "$RELEASE_ZIP"
+          shasum -a 256 "$RELEASE_ZIP" > "$RELEASE_SUMS"
+          gh release upload "$TAG" "$RELEASE_ZIP" "$RELEASE_SUMS" --clobber

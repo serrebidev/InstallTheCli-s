@@ -1,6 +1,8 @@
 import ctypes
 import glob
+import html
 import os
+import posixpath
 import shlex
 import shutil
 import stat
@@ -28,19 +30,29 @@ NODE_WINGET_ID = "OpenJS.NodeJS.LTS"
 PYTHON_314_WINGET_ID = "Python.Python.3.14"
 OLLAMA_WINGET_ID = "Ollama.Ollama"
 LINUX_OLLAMA_INSTALL_URL = "https://ollama.com/install.sh"
+OPENCLAW_INSTALL_URL = "https://openclaw.ai/install.sh"
+HOMEBREW_INSTALL_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
 AUTO_UPDATE_TASK_NAME = "InstallTheCli - Update AI CLIs"
 AUTO_UPDATE_DAILY_TIME = "3:00AM"
 AUTO_UPDATE_DIR_NAME = "InstallTheCli"
 AUTO_UPDATE_PACKAGES_FILE = "auto_update_packages.txt"
 AUTO_UPDATE_SCRIPT_FILE = "auto_update_clis.ps1"
 AUTO_UPDATE_VBS_FILE = "auto_update_clis.vbs"
+MACOS_AUTO_UPDATE_SCRIPT_FILE = "auto_update_clis_macos.sh"
+MACOS_AUTO_UPDATE_PLIST_ID = "com.installthecli.ai-cli-updates"
+MACOS_AUTO_UPDATE_PLIST_FILE = MACOS_AUTO_UPDATE_PLIST_ID + ".plist"
 CODEX_NPM_PACKAGE = "@openai/codex"
 GEMINI_NPM_PACKAGE = "@google/gemini-cli"
+GROK_NPM_PACKAGE = "@vibe-kit/grok-cli"
+OPENCLAW_NPM_PACKAGE = "openclaw"
 GUI_LAST_RUN_LOG_FILE = "gui_last_run.log"
 NPM_INSTALL_MAX_ATTEMPTS = 3
 NPM_INSTALL_RETRY_DELAY_SECONDS = 2.0
 NPM_QUIET_FLAGS = ["--no-fund", "--no-audit", "--no-update-notifier", "--loglevel", "error"]
 PIP_QUIET_FLAGS = ["--disable-pip-version-check", "--no-input", "--quiet"]
+MACOS_BREW_FORMULA_CLIS = ("gemini-cli", "qwen-code", "mistral-vibe", "ollama", "ironclaw")
+MACOS_BREW_CASK_CLIS = ("claude-code", "codex", "copilot-cli")
+MACOS_NPM_UPDATE_PACKAGES = (GROK_NPM_PACKAGE, OPENCLAW_NPM_PACKAGE)
 
 
 @dataclass(frozen=True)
@@ -51,6 +63,11 @@ class CliSpec:
     package_candidates: tuple[str, ...]
     command_candidates: tuple[str, ...]
     shortcut_name: str
+    macos_brew_formula: Optional[str] = None
+    macos_brew_cask: Optional[str] = None
+    macos_official_install_url: Optional[str] = None
+    macos_requires_node_major: Optional[int] = None
+    macos_requires_node_version: Optional[tuple[int, int, int]] = None
     optional: bool = False
 
 
@@ -63,8 +80,10 @@ class GuiAppSpec:
     winget_source: Optional[str] = None
     flatpak_id: Optional[str] = None
     snap_name: Optional[str] = None
+    macos_brew_cask: Optional[str] = None
     windows_browser_url: Optional[str] = None
     linux_browser_url: Optional[str] = None
+    macos_browser_url: Optional[str] = None
     optional: bool = False
 
 
@@ -76,6 +95,7 @@ CLI_SPECS: tuple[CliSpec, ...] = (
         package_candidates=("@anthropic-ai/claude-code",),
         command_candidates=("claude",),
         shortcut_name="Claude CLI",
+        macos_brew_cask="claude-code",
     ),
     CliSpec(
         key="codex",
@@ -84,6 +104,7 @@ CLI_SPECS: tuple[CliSpec, ...] = (
         package_candidates=("@openai/codex",),
         command_candidates=("codex",),
         shortcut_name="Codex CLI",
+        macos_brew_cask="codex",
     ),
     CliSpec(
         key="gemini",
@@ -92,6 +113,7 @@ CLI_SPECS: tuple[CliSpec, ...] = (
         package_candidates=("@google/gemini-cli",),
         command_candidates=("gemini",),
         shortcut_name="Gemini CLI",
+        macos_brew_formula="gemini-cli",
     ),
     CliSpec(
         key="grok",
@@ -100,6 +122,8 @@ CLI_SPECS: tuple[CliSpec, ...] = (
         package_candidates=("@vibe-kit/grok-cli",),
         command_candidates=("grok", "grok-cli"),
         shortcut_name="Grok CLI",
+        macos_requires_node_major=20,
+        macos_requires_node_version=(20, 0, 0),
         optional=True,
     ),
     CliSpec(
@@ -109,23 +133,26 @@ CLI_SPECS: tuple[CliSpec, ...] = (
         package_candidates=("@qwen-code/qwen-code", "qwen-code"),
         command_candidates=("qwen", "qwen-code"),
         shortcut_name="Qwen CLI",
+        macos_brew_formula="qwen-code",
     ),
     CliSpec(
         key="mistral",
         label="Mistral Vibe CLI",
-        help_text="Installs Mistral Vibe CLI from https://docs.mistral.ai/mistral-vibe/introduction (Windows: Python 3.14 + uv/pip; Linux: Python 3.12+ + uv/pip).",
+        help_text="Installs Mistral Vibe CLI from https://docs.mistral.ai/mistral-vibe/introduction (Windows: Python 3.14 + uv/pip; Linux: Python 3.12+ + uv/pip; macOS: Homebrew formula).",
         package_candidates=("mistral-vibe",),
         command_candidates=("vibe", "mistral-vibe"),
         shortcut_name="Mistral Vibe CLI",
+        macos_brew_formula="mistral-vibe",
         optional=True,
     ),
     CliSpec(
         key="ollama",
         label="Ollama CLI (Official)",
-        help_text="Installs official Ollama (Windows: winget Ollama.Ollama; Linux: official install script), including the ollama CLI.",
+        help_text="Installs official Ollama (Windows: winget Ollama.Ollama; Linux: official install script; macOS: Homebrew formula), including the ollama CLI.",
         package_candidates=(OLLAMA_WINGET_ID,),
         command_candidates=("ollama",),
         shortcut_name="Ollama CLI",
+        macos_brew_formula="ollama",
     ),
     CliSpec(
         key="copilot",
@@ -134,6 +161,7 @@ CLI_SPECS: tuple[CliSpec, ...] = (
         package_candidates=("@github/copilot", "@githubnext/github-copilot-cli"),
         command_candidates=("copilot", "github-copilot-cli", "github-copilot"),
         shortcut_name="GitHub Copilot CLI",
+        macos_brew_cask="copilot-cli",
     ),
     CliSpec(
         key="openclaw",
@@ -142,15 +170,19 @@ CLI_SPECS: tuple[CliSpec, ...] = (
         package_candidates=("openclaw",),
         command_candidates=("openclaw",),
         shortcut_name="OpenClaw CLI",
+        macos_official_install_url=OPENCLAW_INSTALL_URL,
+        macos_requires_node_major=22,
+        macos_requires_node_version=(22, 14, 0),
         optional=True,
     ),
     CliSpec(
         key="ironclaw",
         label="IronClaw CLI",
-        help_text="Installs IronClaw personal AI assistant CLI from npm (Node 22+ required).",
+        help_text="Installs IronClaw CLI (macOS: Homebrew formula; Windows/Linux: npm fallback, Node 22+ required).",
         package_candidates=("ironclaw",),
         command_candidates=("ironclaw",),
         shortcut_name="IronClaw CLI",
+        macos_brew_formula="ironclaw",
         optional=True,
     ),
 )
@@ -163,6 +195,7 @@ GUI_APP_SPECS: tuple[GuiAppSpec, ...] = (
         help_text="Installs Anthropic Claude consumer desktop app (Windows: winget; Linux: Flatpak from Flathub).",
         winget_id="Anthropic.Claude",
         flatpak_id="ai.anthropic.Claude",
+        macos_brew_cask="claude",
     ),
     GuiAppSpec(
         key="chatgpt_app",
@@ -170,13 +203,17 @@ GUI_APP_SPECS: tuple[GuiAppSpec, ...] = (
         help_text="Installs OpenAI ChatGPT consumer desktop app (Windows: winget; Linux: browser shortcut to chat.openai.com).",
         winget_id="OpenAI.ChatGPT",
         linux_browser_url="https://chat.openai.com",
+        macos_brew_cask="chatgpt",
+        macos_browser_url="https://chatgpt.com",
     ),
     GuiAppSpec(
         key="codex_app",
         label="Codex App (Desktop)",
-        help_text="Installs Codex desktop app from Microsoft Store (Product ID: 9PLM9XGG6VKS).",
+        help_text="Installs Codex desktop app (Windows: Microsoft Store Product ID 9PLM9XGG6VKS; macOS: Homebrew cask).",
         winget_id="9PLM9XGG6VKS",
         winget_source="msstore",
+        macos_brew_cask="codex-app",
+        macos_browser_url="https://openai.com/codex/",
         optional=True,
     ),
     GuiAppSpec(
@@ -185,6 +222,8 @@ GUI_APP_SPECS: tuple[GuiAppSpec, ...] = (
         help_text="Installs Google Gemini consumer desktop app (Windows: winget; Linux: Flatpak from Flathub).",
         winget_id="Google.Gemini",
         flatpak_id="com.google.Gemini",
+        macos_brew_cask="google-gemini",
+        macos_browser_url="https://gemini.google.com",
         optional=True,
     ),
     GuiAppSpec(
@@ -193,6 +232,7 @@ GUI_APP_SPECS: tuple[GuiAppSpec, ...] = (
         help_text="Installs Microsoft Copilot consumer desktop app (Windows: winget; Linux: browser shortcut to copilot.microsoft.com).",
         winget_id="Microsoft.Copilot",
         linux_browser_url="https://copilot.microsoft.com",
+        macos_browser_url="https://copilot.microsoft.com",
         optional=True,
     ),
     GuiAppSpec(
@@ -201,6 +241,7 @@ GUI_APP_SPECS: tuple[GuiAppSpec, ...] = (
         help_text="Installs Perplexity AI consumer desktop app (Windows: winget; Linux: Flatpak from Flathub).",
         winget_id="PerplexityAI.Perplexity",
         flatpak_id="ai.perplexity.Perplexity",
+        macos_browser_url="https://www.perplexity.ai",
         optional=True,
     ),
 )
@@ -212,6 +253,18 @@ def is_windows() -> bool:
 
 def is_linux() -> bool:
     return sys.platform.startswith("linux")
+
+
+def is_macos() -> bool:
+    return sys.platform == "darwin"
+
+
+def platform_display_name() -> str:
+    if is_windows():
+        return "Windows 11"
+    if is_macos():
+        return "macOS"
+    return "Linux"
 
 
 def is_admin() -> bool:
@@ -340,7 +393,8 @@ def add_dirs_to_path(scope: str, dirs: list[str]) -> tuple[list[str], Optional[s
             return ([], None)
         if scope != "user":
             raise ValueError(f"Unsupported scope: {scope}")
-        profile_path = os.path.join(os.path.expanduser("~"), ".profile")
+        profile_name = ".zprofile" if is_macos() else ".profile"
+        profile_path = os.path.join(os.path.expanduser("~"), profile_name)
         try:
             existing_text = ""
             if os.path.isfile(profile_path):
@@ -449,6 +503,10 @@ def powershell_single_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def xml_escape(value: str) -> str:
+    return html.escape(value, quote=True)
+
+
 def dedupe_preserve_order(values: list[str]) -> list[str]:
     unique: list[str] = []
     seen: set[str] = set()
@@ -460,6 +518,8 @@ def dedupe_preserve_order(values: list[str]) -> list[str]:
 
 
 def get_app_support_directory() -> str:
+    if is_macos():
+        return os.path.join(os.path.expanduser("~"), "Library", "Application Support", AUTO_UPDATE_DIR_NAME)
     if is_linux():
         xdg_state = os.environ.get("XDG_STATE_HOME")
         if xdg_state:
@@ -635,6 +695,9 @@ def ensure_cli_auto_update_task(
     package_names: list[str],
     log: Callable[[str], None],
 ) -> list[str]:
+    if is_macos():
+        ensure_macos_cli_auto_update_task(log)
+        return []
     if not is_windows():
         log("Hidden auto-update scheduler is currently Windows-only; skipping on Linux.")
         return []
@@ -709,6 +772,129 @@ def ensure_cli_auto_update_task(
         + ")."
     )
     return merged_packages
+
+
+def build_macos_cli_auto_update_script() -> str:
+    formula_lines = "\n".join(
+        f"  update_brew_package formula {shlex.quote(name)}" for name in MACOS_BREW_FORMULA_CLIS
+    )
+    cask_lines = "\n".join(
+        f"  update_brew_package cask {shlex.quote(name)}" for name in MACOS_BREW_CASK_CLIS
+    )
+    npm_lines = "\n".join(
+        f"  update_npm_package {shlex.quote(name)}" for name in MACOS_NPM_UPDATE_PACKAGES
+    )
+    return f"""#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\\n\\t'
+PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+export HOMEBREW_NO_AUTO_UPDATE=1
+export npm_config_update_notifier=false
+
+log() {{
+  printf '[installthecli-update] %s\\n' "$*"
+}}
+
+command_exists() {{
+  command -v "$1" >/dev/null 2>&1
+}}
+
+find_brew() {{
+  if command_exists brew; then
+    command -v brew
+    return 0
+  fi
+  for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}}
+
+brew_bin="$(find_brew || true)"
+
+update_brew_package() {{
+  local kind="$1"
+  local name="$2"
+  [[ -n "$brew_bin" ]] || return 0
+  if [[ "$kind" == "cask" ]]; then
+    "$brew_bin" list --cask "$name" >/dev/null 2>&1 || return 0
+    "$brew_bin" upgrade --cask "$name" || true
+  else
+    "$brew_bin" list --formula "$name" >/dev/null 2>&1 || return 0
+    "$brew_bin" upgrade "$name" || true
+  fi
+}}
+
+update_npm_package() {{
+  local package="$1"
+  command_exists npm || return 0
+  npm ls -g --depth=0 "$package" >/dev/null 2>&1 || return 0
+  npm --no-fund --no-audit --no-update-notifier --loglevel error install -g "${{package}}@latest" || true
+}}
+
+if [[ -n "$brew_bin" ]]; then
+  "$brew_bin" update >/dev/null 2>&1 || true
+{formula_lines}
+{cask_lines}
+fi
+
+{npm_lines}
+"""
+
+
+def build_macos_launch_agent_plist(script_path: str) -> str:
+    support_dir = get_app_support_directory()
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{MACOS_AUTO_UPDATE_PLIST_ID}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>{xml_escape(script_path)}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>86400</integer>
+  <key>StandardOutPath</key>
+  <string>{xml_escape(posixpath.join(support_dir, "macos_auto_update.log"))}</string>
+  <key>StandardErrorPath</key>
+  <string>{xml_escape(posixpath.join(support_dir, "macos_auto_update.err.log"))}</string>
+</dict>
+</plist>
+"""
+
+
+def ensure_macos_cli_auto_update_task(log: Callable[[str], None]) -> None:
+    if not is_macos():
+        return
+    support_dir = get_app_support_directory()
+    os.makedirs(support_dir, exist_ok=True)
+    script_path = os.path.join(support_dir, MACOS_AUTO_UPDATE_SCRIPT_FILE)
+    write_text_file(script_path, build_macos_cli_auto_update_script())
+    os.chmod(script_path, 0o755)
+
+    launch_agents_dir = os.path.join(os.path.expanduser("~"), "Library", "LaunchAgents")
+    os.makedirs(launch_agents_dir, exist_ok=True)
+    plist_path = os.path.join(launch_agents_dir, MACOS_AUTO_UPDATE_PLIST_FILE)
+    write_text_file(plist_path, build_macos_launch_agent_plist(script_path))
+
+    uid = str(os.getuid()) if hasattr(os, "getuid") else ""
+    domain = f"gui/{uid}" if uid else "gui"
+    subprocess.run(["launchctl", "bootout", domain, plist_path], capture_output=True, **subprocess_creationflags_kwargs())
+    code = run_command(["launchctl", "bootstrap", domain, plist_path], log)
+    if code != 0:
+        log(f"launchctl bootstrap failed with exit code {format_exit_code(code)}; trying legacy load.")
+        code = run_command(["launchctl", "load", "-w", plist_path], log)
+        if code != 0:
+            raise RuntimeError(f"Unable to configure macOS LaunchAgent updater: launchctl exit code {format_exit_code(code)}")
+    log("Configured macOS LaunchAgent auto-update task (RunAtLoad + daily).")
 
 
 def remove_cli_auto_update_packages(
@@ -828,6 +1014,81 @@ def find_winget() -> Optional[str]:
     return shutil.which("winget")
 
 
+def find_brew() -> Optional[str]:
+    for name in ("brew", "/opt/homebrew/bin/brew", "/usr/local/bin/brew"):
+        path = shutil.which(name) if not os.path.isabs(name) else name
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+def _apply_homebrew_path_hints() -> None:
+    candidates = [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+    ]
+    existing = os.environ.get("PATH", "")
+    parts = existing.split(os.pathsep) if existing else []
+    prepend = [p for p in candidates if os.path.isdir(p) and p not in parts]
+    if prepend:
+        os.environ["PATH"] = os.pathsep.join(prepend + parts)
+
+
+def _prompt_user_yes_no(title: str, message: str) -> bool:
+    if not wx.GetApp():
+        return False
+    result: list[bool] = []
+    done = threading.Event()
+
+    def ask() -> None:
+        answer = wx.MessageBox(message, title, wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION)
+        result.append(answer == wx.YES)
+        done.set()
+
+    wx.CallAfter(ask)
+    done.wait()
+    return bool(result and result[0])
+
+
+def ensure_homebrew(log: Callable[[str], None]) -> str:
+    _apply_homebrew_path_hints()
+    brew = find_brew()
+    if brew:
+        log(f"Homebrew is available: {brew}")
+        return brew
+
+    message = (
+        "Homebrew is required for macOS installs in InstallTheCli.\n\n"
+        "Install Homebrew now using the official installer?"
+    )
+    if not _prompt_user_yes_no("Install Homebrew?", message):
+        raise RuntimeError(
+            "Homebrew is required on macOS. Install it from https://brew.sh/ or rerun and choose to install it."
+        )
+
+    log("Installing Homebrew using the official installer from brew.sh...")
+    env = os.environ.copy()
+    env["NONINTERACTIVE"] = "1"
+    code = run_command(
+        ["/bin/bash", "-c", f"curl -fsSL {HOMEBREW_INSTALL_URL} | /bin/bash"],
+        log,
+        env=env,
+    )
+    if code != 0:
+        raise RuntimeError(f"Homebrew install failed with exit code {format_exit_code(code)}.")
+
+    _apply_homebrew_path_hints()
+    brew = find_brew()
+    if not brew:
+        raise RuntimeError(
+            "Homebrew installed, but brew was not found on PATH. Open a new terminal or add Homebrew shellenv to your shell profile."
+        )
+    log(f"Homebrew is available: {brew}")
+    return brew
+
+
 def find_uv() -> Optional[str]:
     for name in ("uv.exe", "uv"):
         path = shutil.which(name)
@@ -860,6 +1121,16 @@ def find_ollama() -> Optional[str]:
 
     if is_linux():
         for candidate in ("/usr/local/bin/ollama", "/usr/bin/ollama"):
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
+    if is_macos():
+        for candidate in (
+            "/opt/homebrew/bin/ollama",
+            "/usr/local/bin/ollama",
+            "/Applications/Ollama.app/Contents/Resources/ollama",
+        ):
             if os.path.isfile(candidate):
                 return candidate
         return None
@@ -900,6 +1171,39 @@ def get_python_version(prefix_args: list[str]) -> Optional[tuple[int, int, int]]
         return (int(major_s), int(minor_s), int(patch_s))
     except (TypeError, ValueError):
         return None
+
+
+def get_node_version(node_exe: str) -> Optional[tuple[int, int, int]]:
+    try:
+        completed = subprocess.run(
+            [node_exe, "--version"],
+            capture_output=True,
+            text=True,
+            **subprocess_creationflags_kwargs(),
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    text = (completed.stdout or "").strip().lstrip("v")
+    try:
+        major_s, minor_s, patch_s = text.split(".", 2)
+        return (int(major_s), int(minor_s), int(patch_s.split("-", 1)[0]))
+    except (TypeError, ValueError):
+        return None
+
+
+def node_requirement_label(min_version: tuple[int, int, int]) -> str:
+    major, minor, patch = min_version
+    if minor == 0 and patch == 0:
+        return f"v{major}+"
+    if patch == 0:
+        return f"v{major}.{minor}+"
+    return f"v{major}.{minor}.{patch}+"
+
+
+def node_version_satisfies(version: Optional[tuple[int, int, int]], min_version: tuple[int, int, int]) -> bool:
+    return bool(version and version >= min_version)
 
 
 def find_python_314_command() -> Optional[list[str]]:
@@ -1021,7 +1325,22 @@ def get_npm_global_prefix(npm_exe: str, log: Callable[[str], None]) -> Optional[
 def get_cli_bin_dirs(npm_exe: Optional[str], log: Callable[[str], None]) -> list[str]:
     dirs: list[str] = []
 
-    if is_linux():
+    if is_macos():
+        node_dir_candidates = ["/opt/homebrew/bin", "/usr/local/bin"]
+        brew = find_brew()
+        if brew:
+            try:
+                completed = subprocess.run(
+                    [brew, "--prefix"],
+                    capture_output=True,
+                    text=True,
+                    **subprocess_creationflags_kwargs(),
+                )
+                if completed.returncode == 0 and completed.stdout.strip():
+                    node_dir_candidates.insert(0, os.path.join(completed.stdout.strip(), "bin"))
+            except OSError:
+                pass
+    elif is_linux():
         node_dir_candidates = ["/usr/local/bin", "/usr/bin"]
     else:
         node_dir_candidates = [
@@ -1032,11 +1351,16 @@ def get_cli_bin_dirs(npm_exe: Optional[str], log: Callable[[str], None]) -> list
         if os.path.isdir(d):
             dirs.append(d)
 
-    appdata = os.environ.get("AppData")
-    if appdata:
-        npm_global_default = os.path.join(appdata, "npm")
-        if os.path.isdir(npm_global_default):
-            dirs.append(npm_global_default)
+    if is_macos():
+        for default in ("/opt/homebrew/bin", "/usr/local/bin", os.path.join(os.path.expanduser("~"), ".local", "bin")):
+            if os.path.isdir(default):
+                dirs.append(default)
+    else:
+        appdata = os.environ.get("AppData")
+        if appdata:
+            npm_global_default = os.path.join(appdata, "npm")
+            if os.path.isdir(npm_global_default):
+                dirs.append(npm_global_default)
 
     if npm_exe:
         prefix = get_npm_global_prefix(npm_exe, log)
@@ -1087,6 +1411,18 @@ def get_python_cli_bin_dirs(log: Callable[[str], None]) -> list[str]:
 def get_ollama_cli_bin_dirs(log: Callable[[str], None]) -> list[str]:
     del log  # reserved for future diagnostics to keep call shape consistent with other helpers
     dirs: list[str] = []
+
+    if is_macos():
+        dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", os.path.join(os.path.expanduser("~"), ".ollama", "bin")])
+        existing_dirs = [d for d in dirs if d and os.path.isdir(d)]
+        unique: list[str] = []
+        seen: set[str] = set()
+        for d in existing_dirs:
+            norm = normalize_path_for_compare(d)
+            if norm not in seen:
+                unique.append(d)
+                seen.add(norm)
+        return unique
 
     if is_linux():
         dirs.extend(["/usr/local/bin", "/usr/bin"])
@@ -1174,7 +1510,109 @@ def ensure_linux_packages_installed(packages: list[str], log: Callable[[str], No
             )
 
 
+def brew_package_installed(brew: str, name: str, cask: bool = False) -> bool:
+    args = [brew, "list", "--cask" if cask else "--formula", name]
+    completed = _probe_command(args)
+    return bool(completed and completed.returncode == 0)
+
+
+def brew_install_or_upgrade(
+    name: str,
+    log: Callable[[str], None],
+    cask: bool = False,
+) -> tuple[bool, str]:
+    brew = ensure_homebrew(log)
+    kind = "cask" if cask else "formula"
+    install_args = [brew, "install"]
+    upgrade_args = [brew, "upgrade"]
+    uninstall_hint = f"--{kind}" if cask else "--formula"
+    if cask:
+        install_args.append("--cask")
+        upgrade_args.append("--cask")
+    install_args.append(name)
+    upgrade_args.append(name)
+
+    if brew_package_installed(brew, name, cask=cask):
+        log(f"Homebrew {kind} already installed: {name}. Upgrading...")
+        code = run_command(upgrade_args, log)
+        if code == 0:
+            return (True, name)
+        log(f"brew upgrade {uninstall_hint} {name} failed with exit code {format_exit_code(code)}; continuing with installed copy.")
+        return (True, name)
+
+    log(f"Installing Homebrew {kind}: {name}")
+    code = run_command(install_args, log)
+    if code == 0:
+        return (True, name)
+
+    log(f"brew install {uninstall_hint} {name} failed with exit code {format_exit_code(code)}; trying upgrade...")
+    code = run_command(upgrade_args, log)
+    if code == 0:
+        return (True, name)
+    return (False, f"brew {kind} {name} failed with exit code {format_exit_code(code)}")
+
+
+def brew_uninstall(
+    name: str,
+    log: Callable[[str], None],
+    cask: bool = False,
+) -> tuple[bool, str]:
+    brew = ensure_homebrew(log)
+    args = [brew, "uninstall"]
+    if cask:
+        args.append("--cask")
+    args.append(name)
+    code = run_command(args, log)
+    if code == 0:
+        return (True, name)
+    return (False, f"brew uninstall {name} failed with exit code {format_exit_code(code)}")
+
+
+def ensure_node_via_brew(
+    log: Callable[[str], None],
+    min_major: int = 20,
+    min_version: Optional[tuple[int, int, int]] = None,
+) -> None:
+    required = min_version or (min_major, 0, 0)
+    requirement = node_requirement_label(required)
+    node_path = find_node()
+    npm_path = find_npm()
+    version = get_node_version(node_path) if node_path else None
+    if node_path and npm_path and node_version_satisfies(version, required):
+        log(f"Node.js is already available: {node_path} (v{'.'.join(str(v) for v in version)})")
+        log(f"npm is already available: {npm_path}")
+        return
+
+    if node_path and version:
+        log(
+            f"Node.js v{'.'.join(str(v) for v in version)} is below the required {requirement}; installing/upgrading node via Homebrew."
+        )
+    else:
+        log(f"Node.js {requirement} and npm are required; installing node via Homebrew.")
+
+    ok, detail = brew_install_or_upgrade("node", log)
+    if not ok:
+        raise RuntimeError(detail)
+
+    _apply_homebrew_path_hints()
+    node_path = find_node()
+    npm_path = find_npm()
+    version = get_node_version(node_path) if node_path else None
+    if not node_path or not npm_path or not node_version_satisfies(version, required):
+        raise RuntimeError(
+            f"Homebrew node install completed, but Node.js {requirement} and npm were not both found. "
+            "Open a new terminal or run `brew doctor` and ensure Homebrew is on PATH."
+        )
+    log(f"Node.js is available: {node_path} (v{'.'.join(str(v) for v in version)})")
+    log(f"npm is available: {npm_path}")
+
+
 def ensure_node_via_winget(log: Callable[[str], None]) -> None:
+    if is_macos():
+        ensure_homebrew(log)
+        ensure_node_via_brew(log, 20)
+        return
+
     if is_linux():
         node_path = find_node()
         npm_path = find_npm()
@@ -1249,6 +1687,13 @@ def ensure_node_via_winget(log: Callable[[str], None]) -> None:
 
 def ensure_ollama_via_winget(log: Callable[[str], None]) -> tuple[bool, Optional[str]]:
     package_name = OLLAMA_WINGET_ID
+
+    if is_macos():
+        existing = find_ollama()
+        if existing:
+            log(f"Ollama CLI is already available: {existing}")
+        ok, detail = brew_install_or_upgrade("ollama", log)
+        return (ok, detail)
 
     if is_linux():
         existing = find_ollama()
@@ -1474,6 +1919,11 @@ def ensure_uv_for_mistral(python_cmd: list[str], log: Callable[[str], None]) -> 
 
 
 def ensure_mistral_vibe_dependencies(log: Callable[[str], None]) -> tuple[list[str], Optional[str]]:
+    if is_macos():
+        ok, detail = brew_install_or_upgrade("mistral-vibe", log)
+        if ok:
+            return (["mistral-vibe"], None)
+        raise RuntimeError(detail)
     if is_linux():
         python_cmd = ensure_python_for_mistral_on_linux(log)
         ensure_pip3_for_python(python_cmd, log, "Python 3.12+ (Linux)")
@@ -1489,6 +1939,10 @@ def try_install_mistral_vibe(
     log: Callable[[str], None],
 ) -> tuple[bool, Optional[str]]:
     package_name = spec.package_candidates[0] if spec.package_candidates else "mistral-vibe"
+
+    if is_macos():
+        ok, detail = brew_install_or_upgrade(spec.macos_brew_formula or "mistral-vibe", log)
+        return (ok, detail)
 
     try:
         python_cmd, uv_exe = ensure_mistral_vibe_dependencies(log)
@@ -1545,6 +1999,10 @@ def try_uninstall_mistral_vibe(
     log: Callable[[str], None],
 ) -> tuple[bool, Optional[str]]:
     package_name = spec.package_candidates[0] if spec.package_candidates else "mistral-vibe"
+
+    if is_macos():
+        return brew_uninstall(spec.macos_brew_formula or "mistral-vibe", log)
+
     uv_ok = False
     pip_ok = False
 
@@ -1605,6 +2063,12 @@ def try_uninstall_ollama(log: Callable[[str], None]) -> tuple[bool, Optional[str
     if not existing_before:
         log("Ollama CLI was not detected; nothing to uninstall.")
         return (True, package_name)
+
+    if is_macos():
+        ok, detail = brew_uninstall("ollama", log)
+        if ok or not find_ollama():
+            return (True, detail)
+        return (False, detail)
 
     if is_linux():
         linux_steps: list[list[str]] = []
@@ -1861,9 +2325,22 @@ def _install_gui_app_winget(spec: GuiAppSpec, log: Callable[[str], None]) -> boo
     return True
 
 
+def _install_gui_app_brew_cask(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
+    if not spec.macos_brew_cask:
+        return False
+    ok, detail = brew_install_or_upgrade(spec.macos_brew_cask, log, cask=True)
+    if ok:
+        log(f"Successfully installed/updated {spec.label} via Homebrew cask.")
+        return True
+    log(f"{spec.label} Homebrew cask install/update failed: {detail}")
+    return False
+
+
 def _gui_app_browser_url_for_platform(spec: GuiAppSpec) -> Optional[str]:
     if is_windows():
         return spec.windows_browser_url or spec.linux_browser_url
+    if is_macos():
+        return spec.macos_browser_url or spec.linux_browser_url or spec.windows_browser_url
     if is_linux():
         return spec.linux_browser_url or spec.windows_browser_url
     return None
@@ -1873,6 +2350,8 @@ def _gui_app_browser_shortcut_paths(spec: GuiAppSpec) -> list[str]:
     desktop_dir = find_desktop_directory()
     if is_windows():
         return [os.path.join(desktop_dir, f"{spec.label}.url")]
+    if is_macos():
+        return [os.path.join(desktop_dir, f"{spec.label}.webloc")]
     return [
         os.path.join(os.path.expanduser("~"), ".local", "share", "applications", f"installcli-{spec.key}.desktop"),
         os.path.join(desktop_dir, f"{spec.label}.desktop"),
@@ -1922,9 +2401,19 @@ def _snap_app_installed(snap_name: str) -> bool:
     return bool(completed and completed.returncode == 0)
 
 
+def _brew_cask_app_installed(cask_name: str) -> bool:
+    brew = find_brew()
+    if not brew:
+        return False
+    return brew_package_installed(brew, cask_name, cask=True)
+
+
 def is_gui_app_installed(spec: GuiAppSpec) -> bool:
     if is_windows():
         if spec.winget_id and _winget_app_installed(spec.winget_id, spec.winget_source):
+            return True
+    elif is_macos():
+        if spec.macos_brew_cask and _brew_cask_app_installed(spec.macos_brew_cask):
             return True
     elif is_linux():
         if spec.flatpak_id and _flatpak_app_installed(spec.flatpak_id):
@@ -1950,6 +2439,24 @@ def _install_gui_app_browser_shortcut(spec: GuiAppSpec, log: Callable[[str], Non
         ]
         write_text_file(desktop_shortcut, "\n".join(lines) + "\n")
         log(f"Created browser shortcut for {spec.label} → {url}")
+        log(f"Created desktop shortcut: {desktop_shortcut}")
+        return True
+
+    if is_macos():
+        desktop_shortcut = _gui_app_browser_shortcut_paths(spec)[0]
+        os.makedirs(os.path.dirname(desktop_shortcut), exist_ok=True)
+        lines = [
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">",
+            "<plist version=\"1.0\">",
+            "<dict>",
+            "  <key>URL</key>",
+            f"  <string>{xml_escape(url)}</string>",
+            "</dict>",
+            "</plist>",
+        ]
+        write_text_file(desktop_shortcut, "\n".join(lines) + "\n")
+        log(f"Created browser shortcut for {spec.label} -> {url}")
         log(f"Created desktop shortcut: {desktop_shortcut}")
         return True
 
@@ -2032,6 +2539,15 @@ def _uninstall_gui_app_snap(spec: GuiAppSpec, log: Callable[[str], None]) -> boo
     return code == 0
 
 
+def _uninstall_gui_app_brew_cask(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
+    if not spec.macos_brew_cask:
+        return False
+    ok, detail = brew_uninstall(spec.macos_brew_cask, log, cask=True)
+    if not ok:
+        log(f"{spec.label} Homebrew cask uninstall failed: {detail}")
+    return ok
+
+
 def _uninstall_gui_app_browser_shortcut(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
     url = _gui_app_browser_url_for_platform(spec)
     if not url:
@@ -2060,6 +2576,13 @@ def install_gui_app(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
             return True
         log(f"{spec.label}: No Windows install method available. Please install it manually from the app's website.")
         return False
+    if is_macos():
+        if spec.macos_brew_cask and _install_gui_app_brew_cask(spec, log):
+            return True
+        if _install_gui_app_browser_shortcut(spec, log):
+            return True
+        log(f"{spec.label}: No macOS install method available. Please install it manually from the app's website.")
+        return False
     if is_linux():
         if spec.flatpak_id and _install_gui_app_flatpak(spec, log):
             return True
@@ -2079,6 +2602,13 @@ def uninstall_gui_app(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
         if spec.winget_id:
             attempted = True
             _uninstall_gui_app_winget(spec, log)
+        if _gui_app_browser_url_for_platform(spec):
+            attempted = True
+            _uninstall_gui_app_browser_shortcut(spec, log)
+    elif is_macos():
+        if spec.macos_brew_cask:
+            attempted = True
+            _uninstall_gui_app_brew_cask(spec, log)
         if _gui_app_browser_url_for_platform(spec):
             attempted = True
             _uninstall_gui_app_browser_shortcut(spec, log)
@@ -2134,6 +2664,48 @@ def try_install_package_candidates(
     return (False, last_error)
 
 
+def try_install_openclaw_official_macos(
+    spec: CliSpec,
+    log: Callable[[str], None],
+) -> tuple[bool, Optional[str]]:
+    ensure_homebrew(log)
+    required = spec.macos_requires_node_version or (spec.macos_requires_node_major or 22, 0, 0)
+    ensure_node_via_brew(log, required[0], min_version=required)
+    url = spec.macos_official_install_url or OPENCLAW_INSTALL_URL
+    log("Installing OpenClaw using the official macOS/Linux installer...")
+    code = run_command(["/bin/bash", "-c", f"curl -fsSL {url} | /bin/bash -s -- --no-onboard"], log)
+    if code == 0:
+        return (True, OPENCLAW_NPM_PACKAGE)
+    return (False, f"OpenClaw official installer failed with exit code {format_exit_code(code)}")
+
+
+def try_install_macos_cli(
+    spec: CliSpec,
+    log: Callable[[str], None],
+) -> tuple[bool, Optional[str]]:
+    try:
+        if spec.macos_brew_cask:
+            return brew_install_or_upgrade(spec.macos_brew_cask, log, cask=True)
+        if spec.macos_brew_formula:
+            return brew_install_or_upgrade(spec.macos_brew_formula, log, cask=False)
+        if spec.macos_official_install_url:
+            return try_install_openclaw_official_macos(spec, log)
+        if spec.macos_requires_node_major:
+            required = spec.macos_requires_node_version or (spec.macos_requires_node_major, 0, 0)
+            ensure_node_via_brew(log, required[0], min_version=required)
+    except RuntimeError as exc:
+        err = str(exc)
+        log(err)
+        return (False, err)
+
+    npm_exe = find_npm()
+    if not npm_exe:
+        err = "npm was not found. Install Node.js/npm with Homebrew before installing this CLI."
+        log(err)
+        return (False, err)
+    return try_install_package_candidates(npm_exe, spec, log)
+
+
 def try_uninstall_package_candidates(
     npm_exe: str,
     spec: CliSpec,
@@ -2165,6 +2737,28 @@ def try_uninstall_package_candidates(
     if saw_success:
         return (True, None)
     return (False, last_error)
+
+
+def try_uninstall_macos_cli(
+    spec: CliSpec,
+    log: Callable[[str], None],
+) -> tuple[bool, Optional[str]]:
+    if spec.macos_brew_cask:
+        return brew_uninstall(spec.macos_brew_cask, log, cask=True)
+    if spec.macos_brew_formula:
+        return brew_uninstall(spec.macos_brew_formula, log, cask=False)
+
+    npm_exe = find_npm()
+    if npm_exe:
+        return try_uninstall_package_candidates(npm_exe, spec, log)
+
+    command_path = resolve_command_path(spec.command_candidates, get_cli_bin_dirs(None, log))
+    if not command_path:
+        log(f"{spec.label} command was not found; treating as already uninstalled.")
+        return (True, spec.package_candidates[0] if spec.package_candidates else None)
+    err = "npm was not found. Cannot uninstall this macOS CLI automatically."
+    log(err)
+    return (False, err)
 
 
 def resolve_command_path(
@@ -2254,6 +2848,22 @@ def create_linux_desktop_shortcut(
     os.chmod(shortcut_path, 0o755)
 
 
+def create_macos_command_shortcut(
+    shortcut_path: str,
+    command_path: str,
+    terminal_title: str,
+) -> None:
+    os.makedirs(os.path.dirname(shortcut_path), exist_ok=True)
+    lines = [
+        "#!/bin/zsh",
+        f"# {terminal_title}",
+        "cd ~",
+        f"exec {shlex.quote(command_path)}",
+    ]
+    write_text_file(shortcut_path, "\n".join(lines) + "\n")
+    os.chmod(shortcut_path, 0o755)
+
+
 def update_desktop_database_for_user(log: Callable[[str], None]) -> None:
     apps_dir = os.path.join(os.path.expanduser("~"), ".local", "share", "applications")
     if shutil.which("update-desktop-database"):
@@ -2288,6 +2898,12 @@ def create_cli_desktop_shortcut(
     log: Callable[[str], None],
 ) -> str:
     desktop = find_desktop_directory()
+    if is_macos():
+        shortcut_path = os.path.join(desktop, f"{spec.shortcut_name}.command")
+        create_macos_command_shortcut(shortcut_path, command_path, spec.shortcut_name)
+        log(f"Created desktop command shortcut: {shortcut_path}")
+        return shortcut_path
+
     if not is_windows():
         shortcut_path = os.path.join(desktop, f"{spec.shortcut_name}.desktop")
         create_linux_desktop_shortcut(shortcut_path, command_path, spec.shortcut_name, comment=spec.help_text)
@@ -2320,6 +2936,8 @@ def remove_cli_desktop_shortcuts(spec: CliSpec, log: Callable[[str], None]) -> N
     paths: list[str] = []
     if is_windows():
         paths.append(os.path.join(desktop, f"{spec.shortcut_name}.lnk"))
+    elif is_macos():
+        paths.append(os.path.join(desktop, f"{spec.shortcut_name}.command"))
     else:
         paths.append(os.path.join(desktop, f"{spec.shortcut_name}.desktop"))
         paths.append(
@@ -2348,7 +2966,7 @@ def remove_cli_desktop_shortcuts(spec: CliSpec, log: Callable[[str], None]) -> N
 
 class InstallerFrame(wx.Frame):
     def __init__(self) -> None:  # pragma: no cover
-        platform_label = "Windows 11" if is_windows() else "Linux"
+        platform_label = platform_display_name()
         super().__init__(None, title=f"AI CLI Installer ({platform_label})", size=(920, 820))
         self.worker_thread: Optional[threading.Thread] = None
         self._persistent_log_path: Optional[str] = None
@@ -2361,7 +2979,7 @@ class InstallerFrame(wx.Frame):
         panel = wx.Panel(self)
         root = wx.BoxSizer(wx.VERTICAL)
 
-        title_platform = "Windows 11" if is_windows() else "Linux"
+        title_platform = platform_display_name()
         title = wx.StaticText(panel, label=f"Install AI CLI tools on {title_platform}")
         title_font = title.GetFont()
         title_font.MakeBold()
@@ -2374,7 +2992,11 @@ class InstallerFrame(wx.Frame):
             (
                 "This installer uses winget for Node.js/Ollama, npm for most CLI tools, and uv/pip for Mistral Vibe."
                 if is_windows()
-                else "This installer uses your Linux package manager for Node.js/npm, the official Ollama install script, npm for most CLI tools, and uv/pip for Mistral Vibe."
+                else (
+                    "This installer uses Homebrew for macOS formulas/casks, npm only where no brew package exists, and official installers where required."
+                    if is_macos()
+                    else "This installer uses your Linux package manager for Node.js/npm, the official Ollama install script, npm for most CLI tools, and uv/pip for Mistral Vibe."
+                )
             ),
             "Use Tab and Enter/Space to run install/uninstall actions for each CLI, or use Install All.",
             "Run as Administrator/root if you want system-level installs and PATH updates to succeed.",
@@ -2384,8 +3006,12 @@ class InstallerFrame(wx.Frame):
         note.SetName("Instructions")
         root.Add(note, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
 
-        admin_label_name = "Administrator" if is_windows() else "Root"
-        admin_text = f"{admin_label_name}: Yes" if is_admin() else f"{admin_label_name}: No (system PATH may fail)"
+        admin_label_name = "Administrator" if is_windows() else ("User install" if is_macos() else "Root")
+        admin_text = (
+            "macOS Homebrew/user install"
+            if is_macos()
+            else (f"{admin_label_name}: Yes" if is_admin() else f"{admin_label_name}: No (system PATH may fail)")
+        )
         self.admin_label = wx.StaticText(panel, label=admin_text)
         self.admin_label.SetName("Admin Status")
         root.Add(self.admin_label, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
@@ -2410,7 +3036,7 @@ class InstallerFrame(wx.Frame):
 
         root.Add(box_sizer, 0, wx.LEFT | wx.RIGHT | wx.EXPAND | wx.BOTTOM, 12)
 
-        app_box = wx.StaticBox(panel, label="Install or uninstall AI desktop apps (Windows: winget/browser; Linux: Flatpak/Snap/browser)")
+        app_box = wx.StaticBox(panel, label="Install or uninstall AI desktop apps (Windows: winget/browser; macOS: Homebrew/browser; Linux: Flatpak/Snap/browser)")
         app_box_sizer = wx.StaticBoxSizer(app_box, wx.VERTICAL)
 
         self.gui_app_action_buttons: dict[str, wx.Button] = {}
@@ -2432,12 +3058,12 @@ class InstallerFrame(wx.Frame):
 
         self.auto_update_checkbox = wx.CheckBox(
             panel,
-            label="Enable hidden auto-update task (startup, logon, daily)",
+            label="Enable hidden auto-update task (startup/logon/daily where supported)",
         )
         self.auto_update_checkbox.SetName("Auto Update Toggle")
         self.auto_update_checkbox.SetValue(True)
         self.auto_update_checkbox.SetToolTip(
-            "When enabled, a hidden scheduled task updates installed AI CLIs at startup, logon, and daily."
+            "When enabled, a hidden scheduled task updates installed AI CLIs through Task Scheduler or launchd."
         )
         root.Add(self.auto_update_checkbox, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
 
@@ -2874,7 +3500,7 @@ class InstallerFrame(wx.Frame):
             update_desktop_database_for_user(self.log)
 
     def _run_uninstall(self, selected: list[CliSpec]) -> None:
-        self.log(("Windows 11 AI CLI Uninstaller started." if is_windows() else "Linux AI CLI Uninstaller started."))
+        self.log(f"{platform_display_name()} AI CLI Uninstaller started.")
         persistent_log_path = getattr(self, "_persistent_log_path", None)
         if persistent_log_path:
             self.log(f"Persistent log file: {persistent_log_path}")
@@ -2884,7 +3510,7 @@ class InstallerFrame(wx.Frame):
             self.log("No CLI tools selected for uninstall.")
             return
 
-        needs_npm = any(spec.key not in ("mistral", "ollama") for spec in selected)
+        needs_npm = any(spec.key not in ("mistral", "ollama") for spec in selected) and not is_macos()
         npm_exe: Optional[str] = None
         if needs_npm:
             self.set_status("Locating npm")
@@ -2901,7 +3527,14 @@ class InstallerFrame(wx.Frame):
             self.set_gauge(pct)
             self.set_status(f"Uninstalling {spec.label} ({index}/{total})")
 
-            if spec.key == "mistral":
+            if is_macos():
+                if spec.key == "mistral":
+                    success, detail = try_uninstall_mistral_vibe(spec, self.log)
+                elif spec.key == "ollama":
+                    success, detail = try_uninstall_ollama(self.log)
+                else:
+                    success, detail = try_uninstall_macos_cli(spec, self.log)
+            elif spec.key == "mistral":
                 success, detail = try_uninstall_mistral_vibe(spec, self.log)
             elif spec.key == "ollama":
                 success, detail = try_uninstall_ollama(self.log)
@@ -2935,30 +3568,48 @@ class InstallerFrame(wx.Frame):
         self.log("CLI uninstall run complete.")
 
     def _run_install(self, selected: list[CliSpec], enable_auto_update: bool = True) -> None:
-        self.log(("Windows 11 AI CLI Installer started." if is_windows() else "Linux AI CLI Installer started."))
+        self.log(f"{platform_display_name()} AI CLI Installer started.")
         persistent_log_path = getattr(self, "_persistent_log_path", None)
         if persistent_log_path:
             self.log(f"Persistent log file: {persistent_log_path}")
         self.log(f"Administrator mode: {'Yes' if is_admin() else 'No'}")
-        if not is_admin():
+        if not is_admin() and not is_macos():
             self.log(
                 "System PATH update may fail without Administrator/root privileges."
             )
         needs_python_cli_dirs = any(spec.key == "mistral" for spec in selected)
         needs_ollama_cli_dirs = any(spec.key == "ollama" for spec in selected)
 
-        self.set_status("Checking/installing Node.js + npm")
+        self.set_status("Checking/installing requirements")
         self.set_gauge(5)
-        ensure_node_via_winget(self.log)
+        npm_exe: Optional[str] = None
+        if is_macos():
+            ensure_homebrew(self.log)
+            required_node_versions = [
+                spec.macos_requires_node_version or (spec.macos_requires_node_major or 20, 0, 0)
+                for spec in selected
+                if spec.macos_requires_node_major
+                or (not spec.macos_brew_formula and not spec.macos_brew_cask and spec.key not in ("mistral", "ollama"))
+            ]
+            if required_node_versions:
+                required = max(required_node_versions)
+                ensure_node_via_brew(self.log, required[0], min_version=required)
+            npm_exe = find_npm()
+        else:
+            ensure_node_via_winget(self.log)
 
         self.set_status("Locating npm")
         self.set_gauge(15)
-        npm_exe = find_npm()
-        if not npm_exe:
+        if npm_exe is None:
+            npm_exe = find_npm()
+        if not npm_exe and not is_macos():
             raise RuntimeError(
                 "npm was not found after Node.js setup. Try closing and reopening the app, or install Node.js manually."
             )
-        self.log(f"Using npm executable: {npm_exe}")
+        if npm_exe:
+            self.log(f"Using npm executable: {npm_exe}")
+        else:
+            self.log("npm is not required for the selected macOS installs.")
 
         cli_bin_dirs = get_cli_bin_dirs(npm_exe, self.log)
         if needs_python_cli_dirs:
@@ -2995,7 +3646,14 @@ class InstallerFrame(wx.Frame):
             self.set_gauge(pct)
             self.set_status(f"Installing {spec.label} ({index}/{total})")
 
-            if spec.key == "mistral":
+            if is_macos():
+                if spec.key == "mistral":
+                    success, pkg = try_install_mistral_vibe(spec, self.log)
+                elif spec.key == "ollama":
+                    success, pkg = ensure_ollama_via_winget(self.log)
+                else:
+                    success, pkg = try_install_macos_cli(spec, self.log)
+            elif spec.key == "mistral":
                 success, pkg = try_install_mistral_vibe(spec, self.log)
             elif spec.key == "ollama":
                 success, pkg = ensure_ollama_via_winget(self.log)
@@ -3022,7 +3680,7 @@ class InstallerFrame(wx.Frame):
 
             assert pkg is not None
             self.log(f"Installed {spec.label} using package {pkg}")
-            if spec.key not in ("mistral", "ollama"):
+            if not is_macos() and spec.key not in ("mistral", "ollama"):
                 installed_packages.append(pkg)
 
             cli_bin_dirs = get_cli_bin_dirs(npm_exe, self.log)
@@ -3061,7 +3719,7 @@ class InstallerFrame(wx.Frame):
         self.set_gauge(90)
         if enable_auto_update:
             try:
-                ensure_cli_auto_update_task(npm_exe, installed_packages, self.log)
+                ensure_cli_auto_update_task(npm_exe or "", installed_packages, self.log)
             except Exception as exc:
                 self.log(f"Auto-update task warning: {exc}")
         else:
@@ -3085,9 +3743,9 @@ class InstallerFrame(wx.Frame):
 
 class InstallerApp(wx.App):
     def OnInit(self) -> bool:
-        if not (is_windows() or is_linux()):
+        if not (is_windows() or is_macos() or is_linux()):
             wx.MessageBox(
-                "This installer currently supports Windows and Linux (Debian/Ubuntu, Fedora, Arch).",
+                "This installer currently supports Windows, macOS, and Linux (Debian/Ubuntu, Fedora, Arch).",
                 "Unsupported OS",
                 wx.OK | wx.ICON_ERROR,
             )

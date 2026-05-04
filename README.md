@@ -4,6 +4,7 @@ I know the name is boring. This project installs a bunch of AI CLIs so you do no
 
 It supports:
 - Windows (GUI app + one-click PowerShell script)
+- macOS (GUI app + one-click Bash script using Homebrew/official installers)
 - Linux: Debian, Ubuntu, Fedora, Arch (one-click Bash script, plus Linux support in the GUI app)
 
 ## What It Installs
@@ -43,6 +44,7 @@ It may:
 
 Auto-update jobs:
 - Windows: hidden Scheduled Task (startup + logon + daily)
+- macOS: LaunchAgent (RunAtLoad + daily)
 - Linux: cron (`@reboot` + daily)
 
 ## Windows (GUI)
@@ -101,6 +103,52 @@ Useful flags:
 - `-DryRun` (prints commands only)
 - `-NoAutoUpdate` (skip hidden updater task)
 - `-AutoUpdateTime "3:00AM"` (change daily run time)
+
+## macOS (GUI + One-Click Bash)
+
+macOS installs use Homebrew wherever a formula or cask exists. If Homebrew is missing, the GUI and script ask before installing it with the official Homebrew installer.
+
+Run the Python GUI directly:
+```bash
+python3 ai_cli_installer_gui.py
+```
+
+Run the one-click script:
+```bash
+./install_all_macos.sh
+```
+
+Help:
+```bash
+./install_all_macos.sh help
+```
+
+List targets:
+```bash
+./install_all_macos.sh list
+```
+
+Install one thing:
+```bash
+./install_all_macos.sh install codex
+./install_all_macos.sh install openclaw
+./install_all_macos.sh install mistral --no-launch-agent
+```
+
+Only configure the LaunchAgent updater:
+```bash
+./install_all_macos.sh setup-launch-agent
+```
+
+Useful flags:
+- `--dry-run`
+- `--no-launch-agent`
+
+macOS install sources:
+- Homebrew casks: Claude Code, Codex CLI, GitHub Copilot CLI
+- Homebrew formulae: Gemini CLI, Qwen CLI, Mistral Vibe CLI, Ollama, IronClaw
+- npm via Homebrew Node.js where needed: Grok CLI
+- official installer: OpenClaw (checks Node.js 22.14+)
 
 ## Linux (One-Click Bash)
 
@@ -180,6 +228,18 @@ Behavior:
 - runs on reboot and daily
 - non-interactive cron job
 - npm CLIs are refreshed with `npm install -g <package>@latest`
+
+### macOS
+
+Files:
+- `~/Library/Application Support/InstallTheCli/auto_update_clis_macos.sh`
+- `~/Library/LaunchAgents/com.installthecli.ai-cli-updates.plist`
+- `~/Library/Application Support/InstallTheCli/macos_auto_update.log`
+
+Behavior:
+- runs at login/load and daily
+- updates installed Homebrew formulae/casks
+- refreshes npm CLIs only when those npm packages are globally installed
 
 ## Build From Source (Windows)
 

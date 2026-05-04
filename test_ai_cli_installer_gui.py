@@ -88,6 +88,25 @@ class UtilityFunctionTests(unittest.TestCase):
         with patch.object(m.sys, "platform", "win32"):
             self.assertFalse(m.is_linux())
 
+    def test_is_macos_reflects_platform_and_display_label(self) -> None:
+        with patch.object(m.sys, "platform", "darwin"):
+            self.assertTrue(m.is_macos())
+        with patch.object(m.sys, "platform", "linux"):
+            self.assertFalse(m.is_macos())
+
+        with patch.object(m, "is_windows", return_value=True):
+            self.assertEqual(m.platform_display_name(), "Windows 11")
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+        ):
+            self.assertEqual(m.platform_display_name(), "macOS")
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=False),
+        ):
+            self.assertEqual(m.platform_display_name(), "Linux")
+
     def test_is_admin_handles_success_and_exception(self) -> None:
         windll_true = types.SimpleNamespace(
             shell32=types.SimpleNamespace(IsUserAnAdmin=lambda: 1)
@@ -161,18 +180,41 @@ class UtilityFunctionTests(unittest.TestCase):
         grok = next(spec for spec in m.CLI_SPECS if spec.key == "grok")
         self.assertEqual(grok.package_candidates, ("@vibe-kit/grok-cli",))
         self.assertIn("grok", grok.command_candidates)
+        self.assertEqual(grok.macos_requires_node_major, 20)
 
     def test_ollama_spec_uses_official_winget_package(self) -> None:
         ollama = next(spec for spec in m.CLI_SPECS if spec.key == "ollama")
         self.assertEqual(ollama.package_candidates, (m.OLLAMA_WINGET_ID,))
         self.assertEqual(ollama.command_candidates, ("ollama",))
         self.assertIn("official", ollama.help_text.lower())
+        self.assertEqual(ollama.macos_brew_formula, "ollama")
 
     def test_codex_desktop_app_spec_uses_msstore_product_id(self) -> None:
         codex_app = next(spec for spec in m.GUI_APP_SPECS if spec.key == "codex_app")
         self.assertEqual(codex_app.winget_id, "9PLM9XGG6VKS")
         self.assertEqual(codex_app.winget_source, "msstore")
         self.assertIsNone(codex_app.windows_browser_url)
+        self.assertEqual(codex_app.macos_brew_cask, "codex-app")
+        self.assertEqual(codex_app.macos_browser_url, "https://openai.com/codex/")
+
+    def test_macos_specs_use_homebrew_or_official_installers(self) -> None:
+        by_key = {spec.key: spec for spec in m.CLI_SPECS}
+        self.assertEqual(by_key["claude"].macos_brew_cask, "claude-code")
+        self.assertEqual(by_key["codex"].macos_brew_cask, "codex")
+        self.assertEqual(by_key["gemini"].macos_brew_formula, "gemini-cli")
+        self.assertEqual(by_key["qwen"].macos_brew_formula, "qwen-code")
+        self.assertEqual(by_key["copilot"].macos_brew_cask, "copilot-cli")
+        self.assertEqual(by_key["openclaw"].macos_official_install_url, m.OPENCLAW_INSTALL_URL)
+        self.assertEqual(by_key["openclaw"].macos_requires_node_major, 22)
+        self.assertEqual(by_key["openclaw"].macos_requires_node_version, (22, 14, 0))
+        self.assertEqual(by_key["ironclaw"].macos_brew_formula, "ironclaw")
+
+        apps = {spec.key: spec for spec in m.GUI_APP_SPECS}
+        self.assertEqual(apps["claude_app"].macos_brew_cask, "claude")
+        self.assertEqual(apps["chatgpt_app"].macos_brew_cask, "chatgpt")
+        self.assertEqual(apps["codex_app"].macos_brew_cask, "codex-app")
+        self.assertEqual(apps["gemini_app"].macos_brew_cask, "google-gemini")
+        self.assertEqual(apps["copilot_app"].macos_browser_url, "https://copilot.microsoft.com")
 
     def test_split_path_filters_empty_parts(self) -> None:
         self.assertEqual(m.split_path(""), [])
@@ -192,6 +234,9 @@ class UtilityFunctionTests(unittest.TestCase):
     def test_powershell_single_quote_escapes_embedded_quotes(self) -> None:
         self.assertEqual(m.powershell_single_quote("abc"), "'abc'")
         self.assertEqual(m.powershell_single_quote("a'b"), "'a''b'")
+
+    def test_xml_escape_escapes_plist_values(self) -> None:
+        self.assertEqual(m.xml_escape('/Users/A&B/"Codex"'), "/Users/A&amp;B/&quot;Codex&quot;")
 
     def test_dedupe_preserve_order_keeps_first_occurrence(self) -> None:
         values = ["a", "b", "a", "c", "b"]
@@ -219,6 +264,16 @@ class UtilityFunctionTests(unittest.TestCase):
             self.assertEqual(
                 m.get_app_support_directory(),
                 os.path.join("/home/admin", ".local", "state", "InstallTheCli"),
+            )
+
+    def test_get_app_support_directory_macos_uses_application_support(self) -> None:
+        with (
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m.os.path, "expanduser", return_value="/Users/admin"),
+        ):
+            self.assertEqual(
+                m.get_app_support_directory(),
+                os.path.join("/Users/admin", "Library", "Application Support", "InstallTheCli"),
             )
 
     def test_gui_last_run_log_helpers_create_and_append(self) -> None:
@@ -421,6 +476,23 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertEqual(added, [])
         self.assertIn("profile denied", err or "")
 
+    def test_add_dirs_to_path_macos_uses_zprofile(self) -> None:
+        with tempfile.TemporaryDirectory(dir=".") as tmp_dir:
+            home = os.path.join(tmp_dir, "home")
+            bin_dir = os.path.join(home, ".local", "bin")
+            os.makedirs(bin_dir, exist_ok=True)
+            with (
+                patch.object(m, "is_windows", return_value=False),
+                patch.object(m, "is_macos", return_value=True),
+                patch.object(m.os.path, "expanduser", return_value=home),
+                patch.dict(m.os.environ, {"PATH": "/usr/bin"}, clear=False),
+            ):
+                added, err = m.add_dirs_to_path("user", [bin_dir])
+            self.assertEqual(added, [bin_dir])
+            self.assertIsNone(err)
+            with open(os.path.join(home, ".zprofile"), "r", encoding="utf-8") as f:
+                self.assertIn(bin_dir, f.read())
+
     def test_find_desktop_directory_linux_prefers_existing_then_falls_back(self) -> None:
         with (
             patch.object(m, "is_windows", return_value=False),
@@ -455,6 +527,34 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("setup-cron", script)
         self.assertIn('install -g "${candidate}@latest"', script)
         self.assertIn("if (( DRY_RUN )); then", script)
+
+        with open(script_path, "rb") as f:
+            raw = f.read()
+        self.assertNotIn(b"\r\n", raw)
+
+    def test_macos_one_click_script_exists_and_contains_expected_commands(self) -> None:
+        script_path = os.path.join(os.getcwd(), "install_all_macos.sh")
+        self.assertTrue(os.path.isfile(script_path), f"Missing script: {script_path}")
+        with open(script_path, "r", encoding="utf-8") as f:
+            script = f.read()
+        self.assertIn("Homebrew is required for macOS installs", script)
+        self.assertIn("HOMEBREW_INSTALL_URL", script)
+        self.assertIn("brew_install_cask codex", script)
+        self.assertIn("brew_install_formula gemini-cli", script)
+        self.assertIn("brew_install_formula qwen-code", script)
+        self.assertIn("brew_install_formula mistral-vibe", script)
+        self.assertIn("brew_install_formula ollama", script)
+        self.assertIn("install_npm_cli \"Grok CLI (Vibe Kit)\" 20", script)
+        self.assertIn("install_openclaw_official", script)
+        self.assertIn("node_satisfies()", script)
+        self.assertIn("ensure_node 22 14", script)
+        self.assertIn("setup-launch-agent", script)
+        self.assertIn("launchctl bootstrap", script)
+        self.assertIn("update_brew_package cask codex", script)
+        self.assertIn("update_npm_package \"@vibe-kit/grok-cli\"", script)
+        self.assertIn("lower()", script)
+        self.assertNotIn("${answer,,}", script)
+        self.assertNotIn("${positional[0],,}", script)
 
         with open(script_path, "rb") as f:
             raw = f.read()
@@ -697,6 +797,43 @@ class RegistryAndWindowsTests(unittest.TestCase):
         self.assertEqual(create_linux_mock.call_args_list[1].args[:3], (expected_menu, "/usr/local/bin/ollama", "Ollama CLI"))
         self.assertTrue(any("Created desktop shortcut:" in line for line in logs))
 
+    def test_create_cli_desktop_shortcut_macos_writes_command_file(self) -> None:
+        spec = next(spec for spec in m.CLI_SPECS if spec.key == "codex")
+        logs: list[str] = []
+        with tempfile.TemporaryDirectory(dir=".") as tmp_dir:
+            desktop = os.path.join(tmp_dir, "Desktop")
+            with (
+                patch.object(m, "is_macos", return_value=True),
+                patch.object(m, "find_desktop_directory", return_value=desktop),
+                patch.object(m.os, "chmod") as chmod_mock,
+            ):
+                path = m.create_cli_desktop_shortcut(spec, "/opt/homebrew/bin/codex", logs.append)
+            self.assertEqual(path, os.path.join(desktop, "Codex CLI.command"))
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn("#!/bin/zsh", text)
+            self.assertIn("exec /opt/homebrew/bin/codex", text)
+            chmod_mock.assert_called_once_with(path, 0o755)
+        self.assertTrue(any("Created desktop command shortcut" in line for line in logs))
+
+    def test_remove_cli_desktop_shortcuts_macos_removes_command_file(self) -> None:
+        spec = next(spec for spec in m.CLI_SPECS if spec.key == "codex")
+        logs: list[str] = []
+        with tempfile.TemporaryDirectory(dir=".") as tmp_dir:
+            desktop = os.path.join(tmp_dir, "Desktop")
+            os.makedirs(desktop, exist_ok=True)
+            shortcut = os.path.join(desktop, "Codex CLI.command")
+            with open(shortcut, "w", encoding="utf-8") as f:
+                f.write("#!/bin/zsh\n")
+            with (
+                patch.object(m, "is_windows", return_value=False),
+                patch.object(m, "is_macos", return_value=True),
+                patch.object(m, "find_desktop_directory", return_value=desktop),
+            ):
+                m.remove_cli_desktop_shortcuts(spec, logs.append)
+            self.assertFalse(os.path.exists(shortcut))
+        self.assertTrue(any("Removed shortcut" in line for line in logs))
+
 
 class CommandAndDetectionTests(unittest.TestCase):
     def test_run_command_streams_output_and_returns_exit_code(self) -> None:
@@ -761,6 +898,63 @@ class CommandAndDetectionTests(unittest.TestCase):
         self.assertEqual(result, r"C:\Windows\System32\winget.exe")
         which_mock.assert_called_once_with("winget")
 
+    def test_find_brew_uses_path_and_known_locations(self) -> None:
+        with (
+            patch.object(m.shutil, "which", return_value="/opt/homebrew/bin/brew") as which_mock,
+            patch.object(m.os.path, "isfile", return_value=True),
+        ):
+            self.assertEqual(m.find_brew(), "/opt/homebrew/bin/brew")
+        which_mock.assert_called_once_with("brew")
+
+        with (
+            patch.object(m.shutil, "which", return_value=None),
+            patch.object(m.os.path, "isabs", side_effect=lambda p: p.startswith("/")),
+            patch.object(m.os.path, "isfile", side_effect=lambda p: p == "/usr/local/bin/brew"),
+        ):
+            self.assertEqual(m.find_brew(), "/usr/local/bin/brew")
+
+    def test_apply_homebrew_path_hints_prepends_existing_brew_dirs(self) -> None:
+        with (
+            patch.dict(m.os.environ, {"PATH": "/usr/bin"}, clear=True),
+            patch.object(m.os.path, "isdir", side_effect=lambda p: p in {"/opt/homebrew/bin", "/usr/local/bin"}),
+        ):
+            m._apply_homebrew_path_hints()
+            self.assertTrue(m.os.environ["PATH"].startswith("/opt/homebrew/bin"))
+            self.assertIn("/usr/local/bin", m.os.environ["PATH"])
+
+    def test_prompt_user_yes_no_returns_false_without_wx_app(self) -> None:
+        with patch.object(m.wx, "GetApp", return_value=None):
+            self.assertFalse(m._prompt_user_yes_no("Title", "Message"))
+
+    def test_ensure_homebrew_existing_prompt_declined_and_installed(self) -> None:
+        logs: list[str] = []
+        with (
+            patch.object(m, "_apply_homebrew_path_hints"),
+            patch.object(m, "find_brew", return_value="/opt/homebrew/bin/brew"),
+        ):
+            self.assertEqual(m.ensure_homebrew(logs.append), "/opt/homebrew/bin/brew")
+        self.assertTrue(any("Homebrew is available" in line for line in logs))
+
+        with (
+            patch.object(m, "_apply_homebrew_path_hints"),
+            patch.object(m, "find_brew", return_value=None),
+            patch.object(m, "_prompt_user_yes_no", return_value=False),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                m.ensure_homebrew(lambda _msg: None)
+        self.assertIn("Homebrew is required", str(ctx.exception))
+
+        logs = []
+        with (
+            patch.object(m, "_apply_homebrew_path_hints"),
+            patch.object(m, "find_brew", side_effect=[None, "/opt/homebrew/bin/brew"]),
+            patch.object(m, "_prompt_user_yes_no", return_value=True),
+            patch.object(m, "run_command", return_value=0) as run_mock,
+        ):
+            self.assertEqual(m.ensure_homebrew(logs.append), "/opt/homebrew/bin/brew")
+        self.assertIn(m.HOMEBREW_INSTALL_URL, " ".join(run_mock.call_args.args[0]))
+        self.assertEqual(run_mock.call_args.kwargs["env"]["NONINTERACTIVE"], "1")
+
     def test_find_uv_and_python_launcher_and_pip3_return_none_when_missing(self) -> None:
         with (
             patch.object(m.shutil, "which", return_value=None),
@@ -814,6 +1008,23 @@ class CommandAndDetectionTests(unittest.TestCase):
         ):
             self.assertIsNone(m.find_ollama())
 
+    def test_find_ollama_uses_macos_known_paths(self) -> None:
+        with (
+            patch.object(m.shutil, "which", side_effect=[None, None]),
+            patch.object(m, "is_linux", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m.os.path, "isfile", side_effect=lambda p: p == "/usr/local/bin/ollama"),
+        ):
+            self.assertEqual(m.find_ollama(), "/usr/local/bin/ollama")
+
+        with (
+            patch.object(m.shutil, "which", side_effect=[None, None]),
+            patch.object(m, "is_linux", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m.os.path, "isfile", return_value=False),
+        ):
+            self.assertIsNone(m.find_ollama())
+
     def test_find_pip3_delegates_to_shutil_which(self) -> None:
         with patch.object(m.shutil, "which", return_value=r"C:\Users\Admin\AppData\Roaming\Python\Scripts\pip3.exe"):
             self.assertEqual(m.find_pip3(), r"C:\Users\Admin\AppData\Roaming\Python\Scripts\pip3.exe")
@@ -833,6 +1044,33 @@ class CommandAndDetectionTests(unittest.TestCase):
 
         with patch.object(m.subprocess, "run", side_effect=OSError("no python")):
             self.assertIsNone(m.get_python_version(["py", "-3.14"]))
+
+    def test_get_node_version_parses_and_handles_failures(self) -> None:
+        ok = types.SimpleNamespace(returncode=0, stdout="v22.14.1\n")
+        with patch.object(m.subprocess, "run", return_value=ok):
+            self.assertEqual(m.get_node_version("node"), (22, 14, 1))
+
+        prerelease = types.SimpleNamespace(returncode=0, stdout="v24.0.0-rc.1\n")
+        with patch.object(m.subprocess, "run", return_value=prerelease):
+            self.assertEqual(m.get_node_version("node"), (24, 0, 0))
+
+        bad = types.SimpleNamespace(returncode=1, stdout="")
+        with patch.object(m.subprocess, "run", return_value=bad):
+            self.assertIsNone(m.get_node_version("node"))
+        malformed = types.SimpleNamespace(returncode=0, stdout="not-a-version")
+        with patch.object(m.subprocess, "run", return_value=malformed):
+            self.assertIsNone(m.get_node_version("node"))
+        with patch.object(m.subprocess, "run", side_effect=OSError("no node")):
+            self.assertIsNone(m.get_node_version("node"))
+
+    def test_node_requirement_helpers_label_and_compare_versions(self) -> None:
+        self.assertEqual(m.node_requirement_label((20, 0, 0)), "v20+")
+        self.assertEqual(m.node_requirement_label((22, 14, 0)), "v22.14+")
+        self.assertEqual(m.node_requirement_label((22, 14, 1)), "v22.14.1+")
+        self.assertTrue(m.node_version_satisfies((22, 14, 0), (22, 14, 0)))
+        self.assertTrue(m.node_version_satisfies((24, 0, 0), (22, 14, 0)))
+        self.assertFalse(m.node_version_satisfies((22, 13, 9), (22, 14, 0)))
+        self.assertFalse(m.node_version_satisfies(None, (20, 0, 0)))
 
     def test_find_python_314_command_prefers_py_launcher(self) -> None:
         def fake_which(name: str) -> str | None:
@@ -1079,12 +1317,49 @@ class CommandAndDetectionTests(unittest.TestCase):
             dirs = m.get_cli_bin_dirs("npm", lambda _msg: None)
         self.assertIn("/custom", dirs)
 
+    def test_get_cli_bin_dirs_macos_uses_homebrew_and_npm_prefix(self) -> None:
+        completed = types.SimpleNamespace(returncode=0, stdout="/opt/homebrew\n")
+        local_bin = os.path.join("/Users/admin", ".local", "bin")
+        npm_bin = os.path.join("/Users/admin/npm-global", "bin")
+        existing = {"/opt/homebrew/bin", "/usr/local/bin", local_bin, npm_bin}
+        with (
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_linux", return_value=False),
+            patch.object(m, "find_brew", return_value="/opt/homebrew/bin/brew"),
+            patch.object(m.subprocess, "run", return_value=completed),
+            patch.object(m.os.path, "expanduser", return_value="/Users/admin"),
+            patch.object(m.os.path, "isdir", side_effect=lambda p: p in existing),
+            patch.object(m, "get_npm_global_prefix", return_value="/Users/admin/npm-global"),
+        ):
+            dirs = m.get_cli_bin_dirs("npm", lambda _msg: None)
+        self.assertEqual(dirs[0], "/opt/homebrew/bin")
+        self.assertIn("/usr/local/bin", dirs)
+        self.assertIn(local_bin, dirs)
+        self.assertIn(npm_bin, dirs)
+
     def test_get_ollama_cli_bin_dirs_linux(self) -> None:
         with (
             patch.object(m, "is_linux", return_value=True),
             patch.object(m.os.path, "isdir", side_effect=lambda p: p == "/usr/local/bin"),
         ):
             self.assertEqual(m.get_ollama_cli_bin_dirs(lambda _msg: None), ["/usr/local/bin"])
+
+    def test_get_ollama_cli_bin_dirs_macos(self) -> None:
+        ollama_bin = os.path.join("/Users/admin", ".ollama", "bin")
+        with (
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m.os.path, "expanduser", return_value="/Users/admin"),
+            patch.object(
+                m.os.path,
+                "isdir",
+                side_effect=lambda p: p in {"/opt/homebrew/bin", ollama_bin},
+            ),
+        ):
+            self.assertEqual(
+                m.get_ollama_cli_bin_dirs(lambda _msg: None),
+                ["/opt/homebrew/bin", ollama_bin],
+            )
 
     def test_get_python_cli_bin_dirs_merges_and_dedupes(self) -> None:
         home = r"C:\Users\Admin"
@@ -1230,6 +1505,93 @@ class CommandAndDetectionTests(unittest.TestCase):
         self.assertFalse(success)
         self.assertEqual(err, "@anthropic-ai/claude-code failed with exit code 9")
         self.assertIn(err, logs)
+
+    def test_try_install_openclaw_official_macos_checks_brew_node_and_no_onboard(self) -> None:
+        spec = next(spec for spec in m.CLI_SPECS if spec.key == "openclaw")
+        with (
+            patch.object(m, "ensure_homebrew") as brew_mock,
+            patch.object(m, "ensure_node_via_brew") as node_mock,
+            patch.object(m, "run_command", return_value=0) as run_mock,
+        ):
+            ok, detail = m.try_install_openclaw_official_macos(spec, lambda _msg: None)
+        self.assertTrue(ok)
+        self.assertEqual(detail, m.OPENCLAW_NPM_PACKAGE)
+        brew_mock.assert_called_once()
+        node_mock.assert_called_once_with(unittest.mock.ANY, 22, min_version=(22, 14, 0))
+        command_text = " ".join(run_mock.call_args.args[0])
+        self.assertIn(m.OPENCLAW_INSTALL_URL, command_text)
+        self.assertIn("--no-onboard", command_text)
+
+    def test_try_install_macos_cli_prefers_brew_or_npm_fallback(self) -> None:
+        codex = next(spec for spec in m.CLI_SPECS if spec.key == "codex")
+        gemini = next(spec for spec in m.CLI_SPECS if spec.key == "gemini")
+        grok = next(spec for spec in m.CLI_SPECS if spec.key == "grok")
+
+        with patch.object(m, "brew_install_or_upgrade", return_value=(True, "codex")) as brew_mock:
+            self.assertEqual(m.try_install_macos_cli(codex, lambda _msg: None), (True, "codex"))
+        brew_mock.assert_called_once_with("codex", unittest.mock.ANY, cask=True)
+
+        with patch.object(m, "brew_install_or_upgrade", return_value=(True, "gemini-cli")) as brew_mock:
+            self.assertEqual(m.try_install_macos_cli(gemini, lambda _msg: None), (True, "gemini-cli"))
+        brew_mock.assert_called_once_with("gemini-cli", unittest.mock.ANY, cask=False)
+
+        with (
+            patch.object(m, "ensure_node_via_brew") as node_mock,
+            patch.object(m, "find_npm", return_value="npm"),
+            patch.object(m, "try_install_package_candidates", return_value=(True, "@vibe-kit/grok-cli")) as npm_mock,
+        ):
+            self.assertEqual(m.try_install_macos_cli(grok, lambda _msg: None), (True, "@vibe-kit/grok-cli"))
+        node_mock.assert_called_once_with(unittest.mock.ANY, 20, min_version=(20, 0, 0))
+        npm_mock.assert_called_once_with("npm", grok, unittest.mock.ANY)
+
+        with (
+            patch.object(m, "ensure_node_via_brew"),
+            patch.object(m, "find_npm", return_value=None),
+        ):
+            ok, detail = m.try_install_macos_cli(grok, lambda _msg: None)
+        self.assertFalse(ok)
+        self.assertIn("npm was not found", str(detail))
+
+    def test_try_install_macos_cli_returns_runtime_error_detail(self) -> None:
+        codex = next(spec for spec in m.CLI_SPECS if spec.key == "codex")
+        logs: list[str] = []
+        with patch.object(m, "brew_install_or_upgrade", side_effect=RuntimeError("brew denied")):
+            ok, detail = m.try_install_macos_cli(codex, logs.append)
+        self.assertFalse(ok)
+        self.assertEqual(detail, "brew denied")
+        self.assertIn("brew denied", logs)
+
+    def test_try_uninstall_macos_cli_uses_brew_npm_or_already_missing(self) -> None:
+        codex = next(spec for spec in m.CLI_SPECS if spec.key == "codex")
+        grok = next(spec for spec in m.CLI_SPECS if spec.key == "grok")
+        with patch.object(m, "brew_uninstall", return_value=(True, "codex")) as brew_mock:
+            self.assertEqual(m.try_uninstall_macos_cli(codex, lambda _msg: None), (True, "codex"))
+        brew_mock.assert_called_once_with("codex", unittest.mock.ANY, cask=True)
+
+        with (
+            patch.object(m, "find_npm", return_value="npm"),
+            patch.object(m, "try_uninstall_package_candidates", return_value=(True, None)) as npm_mock,
+        ):
+            self.assertEqual(m.try_uninstall_macos_cli(grok, lambda _msg: None), (True, None))
+        npm_mock.assert_called_once_with("npm", grok, unittest.mock.ANY)
+
+        with (
+            patch.object(m, "find_npm", return_value=None),
+            patch.object(m, "get_cli_bin_dirs", return_value=[]),
+            patch.object(m, "resolve_command_path", return_value=None),
+        ):
+            ok, detail = m.try_uninstall_macos_cli(grok, lambda _msg: None)
+        self.assertTrue(ok)
+        self.assertEqual(detail, "@vibe-kit/grok-cli")
+
+        with (
+            patch.object(m, "find_npm", return_value=None),
+            patch.object(m, "get_cli_bin_dirs", return_value=[]),
+            patch.object(m, "resolve_command_path", return_value="/opt/homebrew/bin/grok"),
+        ):
+            ok, detail = m.try_uninstall_macos_cli(grok, lambda _msg: None)
+        self.assertFalse(ok)
+        self.assertIn("npm was not found", str(detail))
 
     def test_try_install_package_candidates_retries_transient_windows_lock_error(self) -> None:
         logs: list[str] = []
@@ -1389,6 +1751,103 @@ class CommandAndDetectionTests(unittest.TestCase):
         ):
             self.assertTrue(m.uninstall_gui_app(spec, lambda _msg: None))
 
+    def test_macos_gui_app_browser_shortcut_writes_webloc_and_escapes_url(self) -> None:
+        spec = m.GuiAppSpec(
+            key="test_app",
+            label="Test App",
+            help_text="test",
+            macos_browser_url="https://example.com/search?q=a&b=1",
+        )
+        logs: list[str] = []
+        with tempfile.TemporaryDirectory(dir=".") as tmp_dir:
+            desktop = os.path.join(tmp_dir, "Desktop")
+            with (
+                patch.object(m, "is_windows", return_value=False),
+                patch.object(m, "is_macos", return_value=True),
+                patch.object(m, "find_desktop_directory", return_value=desktop),
+            ):
+                self.assertTrue(m._install_gui_app_browser_shortcut(spec, logs.append))
+                paths = m._gui_app_browser_shortcut_paths(spec)
+            self.assertEqual(paths, [os.path.join(desktop, "Test App.webloc")])
+            with open(paths[0], "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("<key>URL</key>", content)
+            self.assertIn("https://example.com/search?q=a&amp;b=1", content)
+        self.assertTrue(any("Created browser shortcut" in line for line in logs))
+
+    def test_macos_gui_app_brew_install_detection_and_uninstall(self) -> None:
+        spec = next(item for item in m.GUI_APP_SPECS if item.key == "chatgpt_app")
+        logs: list[str] = []
+        with patch.object(m, "brew_install_or_upgrade", return_value=(True, "chatgpt")) as install_mock:
+            self.assertTrue(m._install_gui_app_brew_cask(spec, logs.append))
+        install_mock.assert_called_once_with("chatgpt", logs.append, cask=True)
+
+        with patch.object(m, "brew_install_or_upgrade", return_value=(False, "brew failed")):
+            self.assertFalse(m._install_gui_app_brew_cask(spec, logs.append))
+
+        with patch.object(m, "find_brew", return_value=None):
+            self.assertFalse(m._brew_cask_app_installed("chatgpt"))
+        with (
+            patch.object(m, "find_brew", return_value="/opt/homebrew/bin/brew"),
+            patch.object(m, "brew_package_installed", return_value=True) as installed_mock,
+        ):
+            self.assertTrue(m._brew_cask_app_installed("chatgpt"))
+        installed_mock.assert_called_once_with("/opt/homebrew/bin/brew", "chatgpt", cask=True)
+
+        with patch.object(m, "brew_uninstall", return_value=(False, "uninstall failed")) as uninstall_mock:
+            self.assertFalse(m._uninstall_gui_app_brew_cask(spec, logs.append))
+        uninstall_mock.assert_called_once_with("chatgpt", logs.append, cask=True)
+
+    def test_install_and_uninstall_gui_app_use_macos_methods(self) -> None:
+        spec = next(item for item in m.GUI_APP_SPECS if item.key == "chatgpt_app")
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "_install_gui_app_brew_cask", return_value=True) as brew_mock,
+            patch.object(m, "_install_gui_app_browser_shortcut") as browser_mock,
+        ):
+            self.assertTrue(m.install_gui_app(spec, lambda _msg: None))
+        brew_mock.assert_called_once_with(spec, unittest.mock.ANY)
+        browser_mock.assert_not_called()
+
+        spec_browser = next(item for item in m.GUI_APP_SPECS if item.key == "copilot_app")
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "_install_gui_app_browser_shortcut", return_value=True) as browser_mock,
+        ):
+            self.assertTrue(m.install_gui_app(spec_browser, lambda _msg: None))
+        browser_mock.assert_called_once_with(spec_browser, unittest.mock.ANY)
+
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "_uninstall_gui_app_brew_cask", return_value=True) as uninstall_brew,
+            patch.object(m, "_uninstall_gui_app_browser_shortcut", return_value=True) as uninstall_shortcut,
+            patch.object(m, "is_gui_app_installed", return_value=False),
+        ):
+            self.assertTrue(m.uninstall_gui_app(spec, lambda _msg: None))
+        uninstall_brew.assert_called_once_with(spec, unittest.mock.ANY)
+        uninstall_shortcut.assert_called_once_with(spec, unittest.mock.ANY)
+
+    def test_is_gui_app_installed_detects_macos_brew_and_shortcut(self) -> None:
+        spec = next(item for item in m.GUI_APP_SPECS if item.key == "chatgpt_app")
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "_brew_cask_app_installed", return_value=True),
+        ):
+            self.assertTrue(m.is_gui_app_installed(spec))
+
+        spec_browser = next(item for item in m.GUI_APP_SPECS if item.key == "copilot_app")
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "find_desktop_directory", return_value="/Users/admin/Desktop"),
+            patch.object(m.os.path, "isfile", side_effect=lambda p: p.endswith("Microsoft Copilot App (Desktop).webloc")),
+        ):
+            self.assertTrue(m.is_gui_app_installed(spec_browser))
+
 
 class AutoUpdateSchedulerTests(unittest.TestCase):
     def test_build_cli_auto_update_script_installs_latest_and_suppresses_output(self) -> None:
@@ -1442,6 +1901,76 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
         # VBScript escape for `"` inside a string literal is `""`
         vbs = m.build_cli_auto_update_vbs(r'C:\weird"path\auto.ps1')
         self.assertIn(r'C:\weird""path\auto.ps1', vbs)
+
+    def test_build_macos_cli_auto_update_script_updates_brew_and_npm_packages(self) -> None:
+        script = m.build_macos_cli_auto_update_script()
+        self.assertIn("brew_bin=\"$(find_brew || true)\"", script)
+        self.assertIn("update_brew_package formula gemini-cli", script)
+        self.assertIn("update_brew_package formula qwen-code", script)
+        self.assertIn("update_brew_package formula mistral-vibe", script)
+        self.assertIn("update_brew_package formula ollama", script)
+        self.assertIn("update_brew_package formula ironclaw", script)
+        self.assertIn("update_brew_package cask claude-code", script)
+        self.assertIn("update_brew_package cask codex", script)
+        self.assertIn("update_brew_package cask copilot-cli", script)
+        self.assertIn("npm --no-fund --no-audit --no-update-notifier --loglevel error install -g", script)
+        self.assertIn('install -g "${package}@latest"', script)
+        self.assertIn("update_npm_package @vibe-kit/grok-cli", script)
+        self.assertIn("update_npm_package openclaw", script)
+
+    def test_build_macos_launch_agent_plist_escapes_paths(self) -> None:
+        with patch.object(m, "get_app_support_directory", return_value="/Users/A&B/Library/Application Support/InstallTheCli"):
+            plist = m.build_macos_launch_agent_plist('/Users/A&B/bin/"update".sh')
+        self.assertIn(m.MACOS_AUTO_UPDATE_PLIST_ID, plist)
+        self.assertIn("<key>RunAtLoad</key>", plist)
+        self.assertIn("<integer>86400</integer>", plist)
+        self.assertIn("/Users/A&amp;B/bin/&quot;update&quot;.sh", plist)
+        self.assertIn("/Users/A&amp;B/Library/Application Support/InstallTheCli/macos_auto_update.log", plist)
+
+    def test_ensure_cli_auto_update_task_uses_launch_agent_on_macos(self) -> None:
+        logs: list[str] = []
+        with (
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "ensure_macos_cli_auto_update_task") as ensure_mock,
+            patch.object(m.subprocess, "run") as run_mock,
+        ):
+            merged = m.ensure_cli_auto_update_task("npm", ["@openai/codex"], logs.append)
+        self.assertEqual(merged, [])
+        ensure_mock.assert_called_once_with(logs.append)
+        run_mock.assert_not_called()
+
+    def test_ensure_macos_cli_auto_update_task_writes_launch_agent_and_falls_back_to_load(self) -> None:
+        logs: list[str] = []
+        with tempfile.TemporaryDirectory(dir=".") as tmp_dir:
+            home = os.path.join(tmp_dir, "home")
+            support_dir = os.path.join(home, "Library", "Application Support", "InstallTheCli")
+            with (
+                patch.object(m, "is_macos", return_value=True),
+                patch.object(m, "get_app_support_directory", return_value=support_dir),
+                patch.object(m.os.path, "expanduser", return_value=home),
+                patch.object(m.os, "getuid", return_value=501, create=True),
+                patch.object(m.subprocess, "run") as bootout_mock,
+                patch.object(m, "run_command", side_effect=[1, 0]) as run_mock,
+            ):
+                m.ensure_macos_cli_auto_update_task(logs.append)
+
+            script_path = os.path.join(support_dir, m.MACOS_AUTO_UPDATE_SCRIPT_FILE)
+            plist_path = os.path.join(home, "Library", "LaunchAgents", m.MACOS_AUTO_UPDATE_PLIST_FILE)
+            self.assertTrue(os.path.isfile(script_path))
+            self.assertTrue(os.path.isfile(plist_path))
+            with open(script_path, "r", encoding="utf-8") as f:
+                script_text = f.read()
+            self.assertIn("update_brew_package cask codex", script_text)
+            with open(plist_path, "r", encoding="utf-8") as f:
+                plist_text = f.read()
+            self.assertIn(m.MACOS_AUTO_UPDATE_PLIST_ID, plist_text)
+            self.assertIn(script_path, plist_text)
+
+        bootout_mock.assert_called_once()
+        self.assertEqual(run_mock.call_args_list[0].args[0][:3], ["launchctl", "bootstrap", "gui/501"])
+        self.assertEqual(run_mock.call_args_list[1].args[0][:3], ["launchctl", "load", "-w"])
+        self.assertTrue(any("trying legacy load" in line for line in logs))
+        self.assertTrue(any("Configured macOS LaunchAgent" in line for line in logs))
 
     def test_ensure_cli_auto_update_task_skips_when_no_packages(self) -> None:
         logs: list[str] = []
@@ -1573,6 +2102,96 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
 
 
 class NodeInstallAndWorkflowTests(unittest.TestCase):
+    def test_brew_package_helpers_install_upgrade_and_uninstall(self) -> None:
+        with patch.object(m, "_probe_command", return_value=types.SimpleNamespace(returncode=0)):
+            self.assertTrue(m.brew_package_installed("/opt/homebrew/bin/brew", "codex", cask=True))
+        with patch.object(m, "_probe_command", return_value=types.SimpleNamespace(returncode=1)):
+            self.assertFalse(m.brew_package_installed("/opt/homebrew/bin/brew", "codex", cask=True))
+
+        logs: list[str] = []
+        with (
+            patch.object(m, "ensure_homebrew", return_value="/opt/homebrew/bin/brew"),
+            patch.object(m, "brew_package_installed", return_value=True),
+            patch.object(m, "run_command", return_value=9) as run_mock,
+        ):
+            ok, detail = m.brew_install_or_upgrade("codex", logs.append, cask=True)
+        self.assertTrue(ok)
+        self.assertEqual(detail, "codex")
+        self.assertEqual(run_mock.call_args.args[0], ["/opt/homebrew/bin/brew", "upgrade", "--cask", "codex"])
+        self.assertTrue(any("continuing with installed copy" in line for line in logs))
+
+        with (
+            patch.object(m, "ensure_homebrew", return_value="/opt/homebrew/bin/brew"),
+            patch.object(m, "brew_package_installed", return_value=False),
+            patch.object(m, "run_command", side_effect=[5, 0]) as run_mock,
+        ):
+            ok, detail = m.brew_install_or_upgrade("gemini-cli", lambda _msg: None)
+        self.assertTrue(ok)
+        self.assertEqual(detail, "gemini-cli")
+        self.assertEqual(run_mock.call_args_list[0].args[0], ["/opt/homebrew/bin/brew", "install", "gemini-cli"])
+        self.assertEqual(run_mock.call_args_list[1].args[0], ["/opt/homebrew/bin/brew", "upgrade", "gemini-cli"])
+
+        with (
+            patch.object(m, "ensure_homebrew", return_value="/opt/homebrew/bin/brew"),
+            patch.object(m, "brew_package_installed", return_value=False),
+            patch.object(m, "run_command", side_effect=[5, 6]),
+        ):
+            ok, detail = m.brew_install_or_upgrade("missing", lambda _msg: None)
+        self.assertFalse(ok)
+        self.assertIn("failed with exit code 6", detail)
+
+        with (
+            patch.object(m, "ensure_homebrew", return_value="/opt/homebrew/bin/brew"),
+            patch.object(m, "run_command", return_value=0) as run_mock,
+        ):
+            ok, detail = m.brew_uninstall("claude", lambda _msg: None, cask=True)
+        self.assertTrue(ok)
+        self.assertEqual(detail, "claude")
+        self.assertEqual(run_mock.call_args.args[0], ["/opt/homebrew/bin/brew", "uninstall", "--cask", "claude"])
+
+    def test_ensure_node_via_brew_existing_installs_and_errors(self) -> None:
+        logs: list[str] = []
+        with (
+            patch.object(m, "find_node", return_value="/opt/homebrew/bin/node"),
+            patch.object(m, "find_npm", return_value="/opt/homebrew/bin/npm"),
+            patch.object(m, "get_node_version", return_value=(22, 14, 1)),
+            patch.object(m, "brew_install_or_upgrade") as brew_mock,
+        ):
+            m.ensure_node_via_brew(logs.append, 22)
+        brew_mock.assert_not_called()
+        self.assertTrue(any("Node.js is already available" in line for line in logs))
+
+        with (
+            patch.object(m, "find_node", side_effect=["/usr/local/bin/node", "/opt/homebrew/bin/node"]),
+            patch.object(m, "find_npm", side_effect=[None, "/opt/homebrew/bin/npm"]),
+            patch.object(m, "get_node_version", side_effect=[(18, 20, 0), (24, 0, 0)]),
+            patch.object(m, "brew_install_or_upgrade", return_value=(True, "node")) as brew_mock,
+            patch.object(m, "_apply_homebrew_path_hints") as path_mock,
+        ):
+            m.ensure_node_via_brew(lambda _msg: None, 22)
+        brew_mock.assert_called_once_with("node", unittest.mock.ANY)
+        path_mock.assert_called_once()
+
+        with (
+            patch.object(m, "find_node", side_effect=[None, None]),
+            patch.object(m, "find_npm", side_effect=[None, None]),
+            patch.object(m, "get_node_version", return_value=None),
+            patch.object(m, "brew_install_or_upgrade", return_value=(False, "brew failed")),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                m.ensure_node_via_brew(lambda _msg: None, 22)
+        self.assertEqual(str(ctx.exception), "brew failed")
+
+    def test_ensure_node_via_winget_uses_homebrew_on_macos(self) -> None:
+        with (
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "ensure_homebrew") as brew_mock,
+            patch.object(m, "ensure_node_via_brew") as node_mock,
+        ):
+            m.ensure_node_via_winget(lambda _msg: None)
+        brew_mock.assert_called_once()
+        node_mock.assert_called_once_with(unittest.mock.ANY, 20)
+
     def test_ensure_node_via_winget_returns_when_already_available(self) -> None:
         logs: list[str] = []
         with (
@@ -1787,6 +2406,19 @@ class NodeInstallAndWorkflowTests(unittest.TestCase):
             ok, err = m.ensure_ollama_via_winget(lambda _msg: None)
         self.assertFalse(ok)
         self.assertIn(m.OLLAMA_WINGET_ID, str(err))
+
+    def test_ensure_ollama_via_winget_uses_homebrew_on_macos(self) -> None:
+        logs: list[str] = []
+        with (
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "find_ollama", return_value="/opt/homebrew/bin/ollama"),
+            patch.object(m, "brew_install_or_upgrade", return_value=(True, "ollama")) as brew_mock,
+        ):
+            ok, detail = m.ensure_ollama_via_winget(logs.append)
+        self.assertTrue(ok)
+        self.assertEqual(detail, "ollama")
+        brew_mock.assert_called_once_with("ollama", logs.append)
+        self.assertTrue(any("Ollama CLI is already available" in line for line in logs))
 
     def test_ensure_ollama_via_winget_installs_official_package(self) -> None:
         logs: list[str] = []
@@ -2010,6 +2642,24 @@ class NodeInstallAndWorkflowTests(unittest.TestCase):
         self.assertTrue(any("uv is already available" in line for line in logs))
         self.assertTrue(any("completed, but uv was not found on PATH yet" in line for line in logs))
 
+    def test_ensure_mistral_vibe_dependencies_uses_homebrew_on_macos(self) -> None:
+        with (
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "brew_install_or_upgrade", return_value=(True, "mistral-vibe")) as brew_mock,
+        ):
+            python_cmd, uv_exe = m.ensure_mistral_vibe_dependencies(lambda _msg: None)
+        self.assertEqual(python_cmd, ["mistral-vibe"])
+        self.assertIsNone(uv_exe)
+        brew_mock.assert_called_once()
+
+        with (
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "brew_install_or_upgrade", return_value=(False, "brew failed")),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                m.ensure_mistral_vibe_dependencies(lambda _msg: None)
+        self.assertEqual(str(ctx.exception), "brew failed")
+
     def test_ensure_mistral_vibe_dependencies_runs_python_pip_and_uv_steps(self) -> None:
         with (
             patch.object(m, "ensure_python_314_via_winget", return_value=["py.exe", "-3.14"]) as py_mock,
@@ -2055,6 +2705,26 @@ class NodeInstallAndWorkflowTests(unittest.TestCase):
         self.assertIn("--upgrade", first_args)
         self.assertEqual(second_args[:4], ["py.exe", "-3.14", "-m", "pip"])
         self.assertTrue(any("uv tool install failed" in line for line in logs))
+
+    def test_try_install_and_uninstall_mistral_vibe_use_homebrew_on_macos(self) -> None:
+        spec = next(spec for spec in m.CLI_SPECS if spec.key == "mistral")
+        with (
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "brew_install_or_upgrade", return_value=(True, "mistral-vibe")) as install_mock,
+        ):
+            ok, detail = m.try_install_mistral_vibe(spec, lambda _msg: None)
+        self.assertTrue(ok)
+        self.assertEqual(detail, "mistral-vibe")
+        install_mock.assert_called_once_with("mistral-vibe", unittest.mock.ANY)
+
+        with (
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "brew_uninstall", return_value=(True, "mistral-vibe")) as uninstall_mock,
+        ):
+            ok, detail = m.try_uninstall_mistral_vibe(spec, lambda _msg: None)
+        self.assertTrue(ok)
+        self.assertEqual(detail, "mistral-vibe")
+        uninstall_mock.assert_called_once_with("mistral-vibe", unittest.mock.ANY)
 
     def test_try_install_mistral_vibe_returns_false_on_dependency_error(self) -> None:
         logs: list[str] = []
@@ -2334,6 +3004,67 @@ class NodeInstallAndWorkflowTests(unittest.TestCase):
 
         auto_update_mock.assert_not_called()
         self.assertTrue(any("Hidden auto-update task disabled for this run." in line for line in dummy.logs))
+
+    def test_run_install_macos_uses_homebrew_requirements_and_launch_agent(self) -> None:
+        dummy = DummyFrame()
+        dummy._run_install = types.MethodType(m.InstallerFrame._run_install, dummy)
+        selected = [
+            next(spec for spec in m.CLI_SPECS if spec.key == "codex"),
+            next(spec for spec in m.CLI_SPECS if spec.key == "grok"),
+            next(spec for spec in m.CLI_SPECS if spec.key == "openclaw"),
+        ]
+        state: dict[str, object] = {"auto_update_packages": None}
+
+        def fake_auto_update(_npm_exe, packages, log):
+            state["auto_update_packages"] = list(packages)
+            log("FAKE: macOS LaunchAgent configured")
+            return []
+
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "is_admin", return_value=False),
+            patch.object(m, "ensure_homebrew") as brew_mock,
+            patch.object(m, "ensure_node_via_brew") as node_mock,
+            patch.object(m, "find_npm", return_value="/opt/homebrew/bin/npm"),
+            patch.object(m, "get_cli_bin_dirs", return_value=["/opt/homebrew/bin"]),
+            patch.object(m, "add_dirs_to_path", return_value=([], None)),
+            patch.object(m, "filter_system_path_dirs", return_value=[]),
+            patch.object(m, "try_install_macos_cli", side_effect=lambda spec, _log: (True, spec.macos_brew_cask or spec.package_candidates[0])),
+            patch.object(m, "resolve_command_path", side_effect=lambda candidates, _dirs: f"/opt/homebrew/bin/{candidates[0]}"),
+            patch.object(m, "ensure_cli_auto_update_task", side_effect=fake_auto_update) as auto_mock,
+            patch.object(m, "create_cli_desktop_shortcut", return_value="/Users/admin/Desktop/Codex CLI.command"),
+        ):
+            dummy._run_install(selected)
+
+        brew_mock.assert_called_once()
+        node_mock.assert_called_once_with(unittest.mock.ANY, 22, min_version=(22, 14, 0))
+        auto_mock.assert_called_once()
+        self.assertEqual(state["auto_update_packages"], [])
+        self.assertTrue(any("macOS AI CLI Installer started." in line for line in dummy.logs))
+        self.assertTrue(any("FAKE: macOS LaunchAgent configured" in line for line in dummy.logs))
+
+    def test_run_uninstall_macos_uses_macos_uninstallers_without_npm_precheck(self) -> None:
+        dummy = DummyFrame()
+        dummy._run_uninstall = types.MethodType(m.InstallerFrame._run_uninstall, dummy)
+        codex = next(spec for spec in m.CLI_SPECS if spec.key == "codex")
+
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "is_admin", return_value=False),
+            patch.object(m, "find_npm") as npm_mock,
+            patch.object(m, "try_uninstall_macos_cli", return_value=(True, "codex")) as uninstall_mock,
+            patch.object(m, "remove_cli_desktop_shortcuts") as shortcuts_mock,
+            patch.object(m, "remove_cli_auto_update_packages") as auto_mock,
+        ):
+            dummy._run_uninstall([codex])
+
+        npm_mock.assert_not_called()
+        uninstall_mock.assert_called_once_with(codex, dummy.log)
+        shortcuts_mock.assert_called_once()
+        auto_mock.assert_not_called()
+        self.assertTrue(any("macOS AI CLI Uninstaller started." in line for line in dummy.logs))
 
     def test_run_install_continues_when_required_cli_locked_but_existing_command_found(self) -> None:
         dummy = DummyFrame()
@@ -2840,6 +3571,21 @@ class AppEntrypointTests(unittest.TestCase):
         with (
             patch.object(m, "is_windows", return_value=False),
             patch.object(m, "is_linux", return_value=True),
+            patch.object(m, "InstallerFrame", return_value=frame) as frame_cls,
+            patch.object(m.wx, "MessageBox") as msg_mock,
+        ):
+            ok = m.InstallerApp.OnInit(types.SimpleNamespace())
+        self.assertTrue(ok)
+        frame_cls.assert_called_once()
+        frame.Show.assert_called_once_with()
+        msg_mock.assert_not_called()
+
+    def test_installer_app_oninit_allows_macos(self) -> None:
+        frame = types.SimpleNamespace(Show=MagicMock())
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "is_linux", return_value=False),
             patch.object(m, "InstallerFrame", return_value=frame) as frame_cls,
             patch.object(m.wx, "MessageBox") as msg_mock,
         ):
