@@ -31,7 +31,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          python -m pip install pyinstaller coverage
+          python -m pip install pyinstaller
 
       - name: Lint install_all_macos.sh
         run: |
@@ -47,10 +47,34 @@ jobs:
           ./install_all_macos.sh list
           ./install_all_macos.sh install codex --dry-run --no-launch-agent
 
-      - name: Run unit tests with coverage
+      - name: Run macOS-relevant unit tests
+        # The full unittest suite is Windows-coupled (winreg, ctypes.windll,
+        # ntpath semantics, hardcoded \\-paths) and is exercised on the
+        # Windows build/CI. Here we run only the tests that target macOS
+        # behaviour and the platform-detection helpers so they get exercised
+        # in a real darwin environment.
         run: |
-          python -m coverage run -m unittest -q test_ai_cli_installer_gui.py
-          python -m coverage report -m ai_cli_installer_gui.py test_ai_cli_installer_gui.py
+          python - <<'PY'
+          import sys, unittest
+          KEYWORDS = ("macos", "darwin", "launch_agent", "launchd",
+                      "brew", "homebrew", "is_macos", "is_linux", "is_windows")
+          loader = unittest.TestLoader()
+          suite = loader.loadTestsFromName("test_ai_cli_installer_gui")
+
+          def flatten(s):
+              for t in s:
+                  if isinstance(t, unittest.TestSuite):
+                      yield from flatten(t)
+                  else:
+                      yield t
+
+          selected = [t for t in flatten(suite)
+                      if any(k in t.id().lower() for k in KEYWORDS)]
+          print(f"Running {len(selected)} macOS-relevant tests")
+          runner = unittest.TextTestRunner(verbosity=2)
+          result = runner.run(unittest.TestSuite(selected))
+          sys.exit(0 if result.wasSuccessful() else 1)
+          PY
 
       - name: Build macOS binary with PyInstaller
         run: |
