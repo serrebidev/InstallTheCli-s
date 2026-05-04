@@ -22,6 +22,8 @@ Installed CLIs currently include:
 - Grok (`@vibe-kit/grok-cli`)
 - Qwen
 - GitHub Copilot CLI
+- OpenClaw CLI (`openclaw`)
+- IronClaw CLI (`ironclaw`)
 - Mistral Vibe CLI (`mistral-vibe`)
 - Ollama (official install)
 
@@ -29,6 +31,8 @@ Auto-update behavior:
 - Windows GUI / PowerShell script: hidden Scheduled Task (`InstallTheCli - Update AI CLIs`)
   - Triggers: startup, logon, daily (`3:00AM` default)
   - No visible cmd/PowerShell window
+  - Launches through `wscript.exe` + `.vbs` so PowerShell stays hidden
+  - Codex updates are skipped while Codex is running; stale npm `.codex-*` temp directories are cleaned when possible
 - Linux script: cron updater
   - `@reboot`
   - daily (`0 3 * * *` default)
@@ -134,6 +138,16 @@ Always fix any warnings, bugs, or errors that appear during a build before shipp
 - `hiddenimports=[]`
 
 Auto-update scripts are generated at runtime under user/system state locations, not bundled.
+
+GitHub release expectations:
+- Release from `master`; `master` is the expected default branch.
+- Publish real releases, not draft releases.
+- Release assets should include:
+  - `InstallTheCli-vX.Y.Z.exe`
+  - `InstallTheCli-vX.Y.Z.zip`
+  - `InstallTheCli-vX.Y.Z-SHA256SUMS.txt`
+  - `install_all_windows.ps1`
+  - `install_all_linux.sh`
 
 ## If You Add A New CLI
 
