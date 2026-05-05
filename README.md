@@ -213,6 +213,7 @@ Behavior:
 - invokes a small `.vbs` wrapper through `wscript.exe`, which launches the PowerShell updater hidden
 - npm CLIs are refreshed with `npm install -g <package>@latest`
 - Codex CLI updates are skipped while Codex is running, then retried on the next task run to avoid locked `codex.exe` cleanup warnings
+- Claude CLI updates are skipped while `claude.exe` is running. If a prior update was interrupted and left `bin/claude.exe.old.<timestamp>` without a current `claude.exe`, the latest `.old` is restored automatically; once `claude.exe` is healthy, leftover `.old.*` files are deleted
 
 Files written under:
 - `%LocalAppData%\InstallTheCli\`

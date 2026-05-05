@@ -370,20 +370,66 @@ function Test-CodexCliRunning {
   }
 }
 
+function Test-ClaudeCliRunning {
+  try {
+    $matches = Get-CimInstance Win32_Process -Filter "name = 'claude.exe'" -ErrorAction SilentlyContinue | Select-Object -First 1
+    return $null -ne $matches
+  } catch {
+    return $false
+  }
+}
+
+# Claude's @anthropic-ai/claude-code postinstall (and Claude's own self-updater)
+# rename bin/claude.exe -> bin/claude.exe.old.<ts> before swapping in a new
+# binary. If the swap fails (claude running -> EBUSY, missing platform package,
+# interrupted download), the install is left with no claude.exe and an orphan
+# .old file. Restore the latest .old when claude.exe is missing; clean up stale
+# .old files (each ~250MB) when claude.exe is healthy.
+function Repair-ClaudeAfterFailedUpdate {
+  if (-not $npmPath) { return }
+  try {
+    $npmBin = & $npmPath prefix -g 2>$null
+    if (-not $npmBin) { return }
+    $npmBin = $npmBin.Trim()
+    $binDir = Join-Path $npmBin 'node_modules\@anthropic-ai\claude-code\bin'
+    if (-not (Test-Path -LiteralPath $binDir)) { return }
+    $claudeExe = Join-Path $binDir 'claude.exe'
+    $orphans = @(Get-ChildItem -LiteralPath $binDir -Filter 'claude.exe.old.*' -File -ErrorAction SilentlyContinue)
+    if ($orphans.Count -eq 0) { return }
+    # `.old.<timestamp>` is monotonic, so name-desc gives the newest first.
+    $orphans = $orphans | Sort-Object Name -Descending
+    if (-not (Test-Path -LiteralPath $claudeExe)) {
+      $latest = $orphans | Select-Object -First 1
+      try {
+        Move-Item -LiteralPath $latest.FullName -Destination $claudeExe -Force -ErrorAction Stop
+        $orphans = $orphans | Where-Object { $_.FullName -ne $latest.FullName }
+      } catch { }
+    }
+    foreach ($o in $orphans) {
+      Remove-Item -LiteralPath $o.FullName -Force -ErrorAction SilentlyContinue
+    }
+  } catch { }
+}
+
 # `npm i -g <pkg>@latest` is more reliable than `npm update -g`, which can
 # leave packages stale when their dist-tag pinning is unusual (codex / claude
 # both showed this in practice).
 function Update-NpmCli([string[]]$Candidates) {
   if (-not $npmPath) { return }
   foreach ($pkg in $Candidates) {
+    if ($pkg -eq '@anthropic-ai/claude-code') { Repair-ClaudeAfterFailedUpdate }
     & $npmPath list -g --depth=0 $pkg *> $null
     if ($LASTEXITCODE -ne 0) { continue }
     if ($pkg -eq '@openai/codex') {
       Remove-CodexNpmTempDirs
       if (Test-CodexCliRunning) { return }
     }
+    if ($pkg -eq '@anthropic-ai/claude-code') {
+      if (Test-ClaudeCliRunning) { return }
+    }
     & $npmPath @NpmFlags i -g ("$pkg@latest") *>&1 | Out-Null
     if ($pkg -eq '@openai/codex') { Remove-CodexNpmTempDirs }
+    if ($pkg -eq '@anthropic-ai/claude-code') { Repair-ClaudeAfterFailedUpdate }
     return
   }
 }

@@ -576,6 +576,12 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("Test-CodexCliRunning", script)
         self.assertIn("Remove-CodexNpmTempDirs", script)
         self.assertIn(".codex-*", script)
+        # Claude updates need the same protection: skip while running, restore
+        # bin/claude.exe from the .old.<ts> orphan if a prior swap failed.
+        self.assertIn("Test-ClaudeCliRunning", script)
+        self.assertIn("Repair-ClaudeAfterFailedUpdate", script)
+        self.assertIn("claude.exe.old.*", script)
+        self.assertIn("@anthropic-ai\\claude-code", script)
         self.assertIn("one_click_update_windows.vbs", script)
         self.assertIn("New-ScheduledTaskAction -Execute 'wscript.exe'", script)
         self.assertIn("bundle\\gemini.js", script)
@@ -1877,6 +1883,14 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
         self.assertIn("$pkg -eq '@openai/codex'", script)
         self.assertIn(".codex-*", script)
         self.assertIn("if (Test-CodexCliRunning) { continue }", script)
+        # Same pattern for claude: skip while running, plus recover bin/claude.exe
+        # from a stranded claude.exe.old.<ts> if a prior swap failed half-way.
+        self.assertIn("function Test-ClaudeCliRunning", script)
+        self.assertIn("function Repair-ClaudeAfterFailedUpdate", script)
+        self.assertIn("$pkg -eq '@anthropic-ai/claude-code'", script)
+        self.assertIn("claude.exe.old.*", script)
+        self.assertIn("node_modules\\@anthropic-ai\\claude-code\\bin", script)
+        self.assertIn("if (Test-ClaudeCliRunning) { continue }", script)
         # Gemini shim regen guarded on @google/gemini-cli being in the package set
         self.assertIn("$packages -contains '@google/gemini-cli'", script)
         self.assertIn("Set-Content -LiteralPath (Join-Path $npmBin 'gemini.cmd')", script)

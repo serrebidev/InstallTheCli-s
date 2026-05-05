@@ -42,6 +42,7 @@ MACOS_AUTO_UPDATE_SCRIPT_FILE = "auto_update_clis_macos.sh"
 MACOS_AUTO_UPDATE_PLIST_ID = "com.installthecli.ai-cli-updates"
 MACOS_AUTO_UPDATE_PLIST_FILE = MACOS_AUTO_UPDATE_PLIST_ID + ".plist"
 CODEX_NPM_PACKAGE = "@openai/codex"
+CLAUDE_NPM_PACKAGE = "@anthropic-ai/claude-code"
 GEMINI_NPM_PACKAGE = "@google/gemini-cli"
 GROK_NPM_PACKAGE = "@vibe-kit/grok-cli"
 OPENCLAW_NPM_PACKAGE = "openclaw"
@@ -584,6 +585,7 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         powershell_single_quote(flag) for flag in NPM_QUIET_FLAGS
     )
     codex_pkg_literal = powershell_single_quote(CODEX_NPM_PACKAGE)
+    claude_pkg_literal = powershell_single_quote(CLAUDE_NPM_PACKAGE)
     gemini_pkg_literal = powershell_single_quote(GEMINI_NPM_PACKAGE)
     lines = [
         "$ErrorActionPreference = 'Stop'",
@@ -638,6 +640,43 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "    return $false",
         "  }",
         "}",
+        # Claude self-updater (and the @anthropic-ai/claude-code postinstall)
+        # rename bin/claude.exe -> bin/claude.exe.old.<ts> before swapping in
+        # a new binary. If the swap fails (claude running -> EBUSY, missing
+        # platform package, interrupted download), the install is left with
+        # no claude.exe and an orphan .old file. Restore the latest .old when
+        # claude.exe is missing; clean up stale .old files (each ~250MB) when
+        # claude.exe is healthy.
+        "function Test-ClaudeCliRunning {",
+        "  try {",
+        "    $matches = Get-CimInstance Win32_Process -Filter \"name = 'claude.exe'\" -ErrorAction SilentlyContinue | Select-Object -First 1",
+        "    return $null -ne $matches",
+        "  } catch {",
+        "    return $false",
+        "  }",
+        "}",
+        "function Repair-ClaudeAfterFailedUpdate {",
+        "  try {",
+        "    $prefix = Get-NpmPrefix",
+        "    if (-not $prefix) { return }",
+        "    $binDir = Join-Path $prefix 'node_modules\\@anthropic-ai\\claude-code\\bin'",
+        "    if (-not (Test-Path -LiteralPath $binDir)) { return }",
+        "    $claudeExe = Join-Path $binDir 'claude.exe'",
+        "    $orphans = @(Get-ChildItem -LiteralPath $binDir -Filter 'claude.exe.old.*' -File -ErrorAction SilentlyContinue)",
+        "    if ($orphans.Count -eq 0) { return }",
+        "    $orphans = $orphans | Sort-Object Name -Descending",
+        "    if (-not (Test-Path -LiteralPath $claudeExe)) {",
+        "      $latest = $orphans | Select-Object -First 1",
+        "      try {",
+        "        Move-Item -LiteralPath $latest.FullName -Destination $claudeExe -Force -ErrorAction Stop",
+        "        $orphans = $orphans | Where-Object { $_.FullName -ne $latest.FullName }",
+        "      } catch { }",
+        "    }",
+        "    foreach ($o in $orphans) {",
+        "      Remove-Item -LiteralPath $o.FullName -Force -ErrorAction SilentlyContinue",
+        "    }",
+        "  } catch { }",
+        "}",
         f"$packagesFile = {powershell_single_quote(packages_file)}",
         "if (-not (Test-Path -LiteralPath $packagesFile)) { exit 0 }",
         "$packages = Get-Content -LiteralPath $packagesFile -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() } | Where-Object { $_ }",
@@ -651,8 +690,13 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "    Remove-CodexNpmTempDirs",
         "    if (Test-CodexCliRunning) { continue }",
         "  }",
+        f"  if ($pkg -eq {claude_pkg_literal}) {{",
+        "    Repair-ClaudeAfterFailedUpdate",
+        "    if (Test-ClaudeCliRunning) { continue }",
+        "  }",
         f"  $null = & $npm {npm_quiet_args} 'i' '-g' (\"$pkg@latest\") *>&1",
         f"  if ($pkg -eq {codex_pkg_literal}) {{ Remove-CodexNpmTempDirs }}",
+        f"  if ($pkg -eq {claude_pkg_literal}) {{ Repair-ClaudeAfterFailedUpdate }}",
         "}",
         # Re-emit the gemini shim if @google/gemini-cli is in the package set.
         # Gemini's npm shim can break across versions when the package layout

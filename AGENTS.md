@@ -34,6 +34,7 @@ Auto-update behavior:
   - No visible cmd/PowerShell window
   - Launches through `wscript.exe` + `.vbs` so PowerShell stays hidden
   - Codex updates are skipped while Codex is running; stale npm `.codex-*` temp directories are cleaned when possible
+  - Claude updates are skipped while `claude.exe` is running; orphaned `bin/claude.exe.old.<ts>` files (left by a half-applied swap, when claude.exe is missing) are renamed back to `claude.exe`, and stale `.old.*` files are deleted once `claude.exe` is healthy
 - Linux script: cron updater
   - `@reboot`
   - daily (`0 3 * * *` default)
@@ -130,6 +131,7 @@ Always fix any warnings, bugs, or errors that appear during a build before shipp
 - Keep logs explicit; users rely on the installer log output to diagnose failures.
 - Do not remove fallback behaviors without replacement:
   - Codex locked-file (`EBUSY`) retry and fallback-to-existing-install
+  - Claude locked-file skip + `claude.exe.old.<ts>` recovery in the Windows updater
   - Windows Scheduled Task registration warning handling
   - Linux distro detection / package manager branching
 
