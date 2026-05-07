@@ -283,6 +283,53 @@ function Install-OllamaOfficial {
     Write-Log 'Installed/updated Ollama (official).'
 }
 
+function Repair-ClaudeAfterFailedUpdate {
+    param([Parameter(Mandatory = $true)][string]$NpmPath)
+
+    if (-not (Test-Path -LiteralPath $NpmPath)) {
+        return $false
+    }
+
+    try {
+        $npmBin = & $NpmPath prefix -g 2>$null
+        if (-not $npmBin) {
+            return $false
+        }
+        $npmBin = $npmBin.Trim()
+        $binDir = Join-Path $npmBin 'node_modules\@anthropic-ai\claude-code\bin'
+        $claudeExe = Join-Path $binDir 'claude.exe'
+        if (-not (Test-Path -LiteralPath $binDir)) {
+            return (Test-Path -LiteralPath $claudeExe -PathType Leaf)
+        }
+
+        $orphans = @(Get-ChildItem -LiteralPath $binDir -Filter 'claude.exe.old.*' -File -ErrorAction SilentlyContinue)
+        if ($orphans.Count -eq 0) {
+            return (Test-Path -LiteralPath $claudeExe -PathType Leaf)
+        }
+
+        $orphans = $orphans | Sort-Object Name -Descending
+        if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) {
+            $latest = $orphans | Select-Object -First 1
+            try {
+                Move-Item -LiteralPath $latest.FullName -Destination $claudeExe -Force -ErrorAction Stop
+                Write-Log "Restored Claude CLI executable from $($latest.Name)."
+                $orphans = $orphans | Where-Object { $_.FullName -ne $latest.FullName }
+            } catch {
+                Write-WarnLog "Could not restore Claude CLI executable: $($_.Exception.Message)"
+                return $false
+            }
+        }
+
+        foreach ($o in $orphans) {
+            Remove-Item -LiteralPath $o.FullName -Force -ErrorAction SilentlyContinue
+        }
+        return (Test-Path -LiteralPath $claudeExe -PathType Leaf)
+    } catch {
+        Write-WarnLog "Claude CLI repair check failed: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Install-NpmCliTarget {
     param(
         [Parameter(Mandatory = $true)][string]$Key,
@@ -299,10 +346,26 @@ function Install-NpmCliTarget {
     }
     $env:npm_config_update_notifier = 'false'
     foreach ($pkg in $spec.Packages) {
+        $isClaudePackage = $pkg -eq '@anthropic-ai/claude-code'
+        if ($isClaudePackage) {
+            [void](Repair-ClaudeAfterFailedUpdate -NpmPath $NpmPath)
+        }
         Write-Log "Trying npm package for $($spec.Label): $pkg"
         $code = Invoke-ExternalCommand -Args (@($NpmPath) + $NpmFlags + @('install', '-g', $pkg))
+        $claudeHealthy = $false
+        if ($isClaudePackage) {
+            $claudeHealthy = Repair-ClaudeAfterFailedUpdate -NpmPath $NpmPath
+        }
         if ($code -eq 0) {
+            if ($isClaudePackage -and -not $claudeHealthy) {
+                Write-WarnLog 'Claude npm install returned success, but claude.exe could not be found.'
+                continue
+            }
             Write-Log "Installed $($spec.Label) using package $pkg"
+            return
+        }
+        if ($isClaudePackage -and $claudeHealthy) {
+            Write-WarnLog 'Claude npm install/update failed, but an existing claude.exe was restored. Continuing with the recovered installation.'
             return
         }
     }

@@ -1366,6 +1366,47 @@ def get_npm_global_prefix(npm_exe: str, log: Callable[[str], None]) -> Optional[
     return None
 
 
+def repair_claude_after_failed_update(npm_exe: str, log: Callable[[str], None]) -> bool:
+    if not is_windows():
+        return False
+
+    prefix = get_npm_global_prefix(npm_exe, log)
+    if not prefix:
+        return False
+
+    bin_dir = os.path.join(prefix, "node_modules", "@anthropic-ai", "claude-code", "bin")
+    claude_exe = os.path.join(bin_dir, "claude.exe")
+    if not os.path.isdir(bin_dir):
+        return os.path.isfile(claude_exe)
+
+    orphans = [
+        path
+        for path in glob.glob(os.path.join(bin_dir, "claude.exe.old.*"))
+        if os.path.isfile(path)
+    ]
+    if not orphans:
+        return os.path.isfile(claude_exe)
+
+    orphans.sort(key=lambda path: os.path.basename(path), reverse=True)
+    if not os.path.isfile(claude_exe):
+        latest = orphans[0]
+        try:
+            os.replace(latest, claude_exe)
+            log(f"Restored Claude CLI executable from {os.path.basename(latest)}.")
+            orphans = orphans[1:]
+        except OSError as exc:
+            log(f"Warning: could not restore Claude CLI executable: {exc}")
+            return False
+
+    for orphan in orphans:
+        try:
+            os.remove(orphan)
+        except OSError as exc:
+            log(f"Warning: could not remove stale Claude CLI backup {os.path.basename(orphan)}: {exc}")
+
+    return os.path.isfile(claude_exe)
+
+
 def get_cli_bin_dirs(npm_exe: Optional[str], log: Callable[[str], None]) -> list[str]:
     dirs: list[str] = []
 
@@ -2687,11 +2728,27 @@ def try_install_package_candidates(
 ) -> tuple[bool, Optional[str]]:
     last_error: Optional[str] = None
     for package_name in spec.package_candidates:
+        is_claude_package = package_name == CLAUDE_NPM_PACKAGE
+        if is_claude_package:
+            repair_claude_after_failed_update(npm_exe, log)
         for attempt in range(1, NPM_INSTALL_MAX_ATTEMPTS + 1):
             suffix = "" if attempt == 1 else f" (attempt {attempt}/{NPM_INSTALL_MAX_ATTEMPTS})"
             log(f"Trying npm package for {spec.label}: {package_name}{suffix}")
             code = npm_install_global(npm_exe, package_name, log)
+            claude_repaired = False
+            if is_claude_package:
+                claude_repaired = repair_claude_after_failed_update(npm_exe, log)
             if code == 0:
+                if is_claude_package and is_windows() and not claude_repaired:
+                    last_error = f"{package_name} installed, but claude.exe was not found"
+                    log(last_error)
+                    break
+                return (True, package_name)
+            if claude_repaired:
+                log(
+                    "Warning: Claude CLI install/update failed, but an existing "
+                    "claude.exe was restored. Continuing with the recovered installation."
+                )
                 return (True, package_name)
 
             if attempt < NPM_INSTALL_MAX_ATTEMPTS and is_probably_windows_errno_exit_code(code):

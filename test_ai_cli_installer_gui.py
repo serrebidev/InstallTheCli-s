@@ -580,6 +580,9 @@ class UtilityFunctionTests(unittest.TestCase):
         # bin/claude.exe from the .old.<ts> orphan if a prior swap failed.
         self.assertIn("Test-ClaudeCliRunning", script)
         self.assertIn("Repair-ClaudeAfterFailedUpdate", script)
+        self.assertIn("Repair-ClaudeAfterFailedUpdate -NpmPath $NpmPath", script)
+        self.assertIn("Claude npm install returned success, but claude.exe could not be found.", script)
+        self.assertIn("existing claude.exe was restored", script)
         self.assertIn("claude.exe.old.*", script)
         self.assertIn("@anthropic-ai\\claude-code", script)
         self.assertIn("one_click_update_windows.vbs", script)
@@ -1460,6 +1463,52 @@ class CommandAndDetectionTests(unittest.TestCase):
         env = run_mock.call_args.kwargs["env"]
         self.assertTrue(env["PATH"].startswith(r"C:\Program Files\nodejs;"))
 
+    def test_repair_claude_after_failed_update_restores_latest_orphan(self) -> None:
+        logs: list[str] = []
+        with tempfile.TemporaryDirectory() as prefix:
+            bin_dir = os.path.join(prefix, "node_modules", "@anthropic-ai", "claude-code", "bin")
+            os.makedirs(bin_dir)
+            old = os.path.join(bin_dir, "claude.exe.old.100")
+            latest = os.path.join(bin_dir, "claude.exe.old.200")
+            with open(old, "w", encoding="utf-8") as f:
+                f.write("old")
+            with open(latest, "w", encoding="utf-8") as f:
+                f.write("latest")
+
+            with (
+                patch.object(m, "is_windows", return_value=True),
+                patch.object(m, "get_npm_global_prefix", return_value=prefix),
+            ):
+                healthy = m.repair_claude_after_failed_update("npm.cmd", logs.append)
+
+            claude_exe = os.path.join(bin_dir, "claude.exe")
+            self.assertTrue(healthy)
+            with open(claude_exe, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "latest")
+            self.assertFalse(os.path.exists(old))
+            self.assertTrue(any("Restored Claude CLI executable" in line for line in logs))
+
+    def test_repair_claude_after_failed_update_cleans_stale_orphans(self) -> None:
+        with tempfile.TemporaryDirectory() as prefix:
+            bin_dir = os.path.join(prefix, "node_modules", "@anthropic-ai", "claude-code", "bin")
+            os.makedirs(bin_dir)
+            claude_exe = os.path.join(bin_dir, "claude.exe")
+            orphan = os.path.join(bin_dir, "claude.exe.old.100")
+            with open(claude_exe, "w", encoding="utf-8") as f:
+                f.write("current")
+            with open(orphan, "w", encoding="utf-8") as f:
+                f.write("old")
+
+            with (
+                patch.object(m, "is_windows", return_value=True),
+                patch.object(m, "get_npm_global_prefix", return_value=prefix),
+            ):
+                healthy = m.repair_claude_after_failed_update("npm.cmd", lambda _msg: None)
+
+            self.assertTrue(healthy)
+            self.assertTrue(os.path.isfile(claude_exe))
+            self.assertFalse(os.path.exists(orphan))
+
     def test_npm_uninstall_global_delegates_to_run_command(self) -> None:
         with (
             patch.object(m, "run_command", return_value=0) as run_mock,
@@ -1506,10 +1555,39 @@ class CommandAndDetectionTests(unittest.TestCase):
     def test_try_install_package_candidates_returns_last_error(self) -> None:
         logs: list[str] = []
         claude = next(spec for spec in m.CLI_SPECS if spec.key == "claude")
-        with patch.object(m, "npm_install_global", return_value=9):
+        with (
+            patch.object(m, "npm_install_global", return_value=9),
+            patch.object(m, "repair_claude_after_failed_update", return_value=False),
+        ):
             success, err = m.try_install_package_candidates("npm.cmd", claude, logs.append)
         self.assertFalse(success)
         self.assertEqual(err, "@anthropic-ai/claude-code failed with exit code 9")
+        self.assertIn(err, logs)
+
+    def test_try_install_package_candidates_recovers_claude_after_failed_install(self) -> None:
+        logs: list[str] = []
+        claude = next(spec for spec in m.CLI_SPECS if spec.key == "claude")
+        with (
+            patch.object(m, "npm_install_global", return_value=9),
+            patch.object(m, "repair_claude_after_failed_update", side_effect=[False, True]) as repair_mock,
+        ):
+            success, pkg = m.try_install_package_candidates("npm.cmd", claude, logs.append)
+        self.assertTrue(success)
+        self.assertEqual(pkg, "@anthropic-ai/claude-code")
+        self.assertEqual(repair_mock.call_count, 2)
+        self.assertTrue(any("existing claude.exe was restored" in line for line in logs))
+
+    def test_try_install_package_candidates_rejects_successful_claude_install_without_exe(self) -> None:
+        logs: list[str] = []
+        claude = next(spec for spec in m.CLI_SPECS if spec.key == "claude")
+        with (
+            patch.object(m, "npm_install_global", return_value=0),
+            patch.object(m, "repair_claude_after_failed_update", return_value=False),
+            patch.object(m, "is_windows", return_value=True),
+        ):
+            success, err = m.try_install_package_candidates("npm.cmd", claude, logs.append)
+        self.assertFalse(success)
+        self.assertEqual(err, "@anthropic-ai/claude-code installed, but claude.exe was not found")
         self.assertIn(err, logs)
 
     def test_try_install_openclaw_official_macos_checks_brew_node_and_no_onboard(self) -> None:
