@@ -286,3 +286,6 @@ ollama
 
 If one fails, rerun the installer for that target only.
 
+##Submit bugs in issues, or join my Telegram group!
+(https://t.me/SerrebiProjects)
+
