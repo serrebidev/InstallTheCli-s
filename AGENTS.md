@@ -175,7 +175,7 @@ Auto-update scripts are generated at runtime under user/system state locations, 
 GitHub release expectations:
 - Release from `master`; `master` is the expected default branch.
 - Publish real releases, not draft releases. Never leave GitHub releases in draft state unless the user explicitly reverses this project preference.
-- Use `build.bat release` for official releases; it publishes the release as Latest/non-draft and removes any remaining draft releases.
+- Use `build.bat release` for official releases; it publishes the release as Latest/non-draft and verifies the final state via `gh release view`. It does NOT delete other draft releases -- prior drafts must be cleaned up manually if you want them gone.
 - Release assets should include:
   - `InstallTheCli-vX.Y.Z.exe`
   - `InstallTheCli-vX.Y.Z.zip`
