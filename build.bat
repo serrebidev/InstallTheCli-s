@@ -13,7 +13,7 @@ if /I not "%MODE%"=="build" if /I not "%MODE%"=="release" if /I not "%MODE%"=="d
 pushd "%~dp0"
 
 if /I "%MODE%"=="build" (
-    call build_exe.bat
+    call "%~dp0build_exe.bat"
     set "RC=!ERRORLEVEL!"
     popd
     exit /b !RC!
@@ -34,7 +34,7 @@ if /I "%MODE%"=="dry-run" (
 
 call :ensure_clean || goto :error
 echo [release] Building %APP_NAME% v%NEXT_VERSION%...
-call build_exe.bat || goto :error
+call "%~dp0build_exe.bat" || goto :error
 call :stage_assets || goto :error
 call :tag_and_push || goto :error
 call :publish_release || goto :error
