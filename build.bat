@@ -1,6 +1,14 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
+REM Wipe PSModulePath so the Windows PowerShell 5.1 we invoke below rebuilds
+REM it from defaults. When build.bat is launched from a PowerShell 7 (pwsh)
+REM parent, the pwsh-flavored PSModulePath inherits down through cmd, and
+REM 5.1 then fails to auto-load Microsoft.PowerShell.Utility -- which is
+REM what provides Get-FileHash. Empty string makes 5.1 reset to its own
+REM defaults on startup. Harmless in plain-cmd invocations.
+set "PSModulePath="
+
 set "APP_NAME=InstallTheCli"
 set "EXE_NAME=InstallTheCli.exe"
 set "GITHUB_REPO_SLUG=serrebidev/InstallTheCli-s"
