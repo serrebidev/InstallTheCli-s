@@ -133,9 +133,23 @@ exit /b 0
 
 :delete_draft_releases
 echo [release] Checking for draft releases in %GITHUB_REPO_SLUG%...
-powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $repo='%GITHUB_REPO_SLUG%'; $drafts = gh release list --repo $repo --limit 100 --json tagName,isDraft | ConvertFrom-Json | Where-Object { $_.isDraft }; foreach ($draft in $drafts) { Write-Host ('Deleting draft release ' + $draft.tagName + '...'); gh release delete $draft.tagName --repo $repo --yes }"
+REM IMPORTANT: never delete the release we JUST published, even if the
+REM GitHub API briefly reports it as draft (we have observed a window
+REM right after `gh release create --latest` + `gh release edit
+REM --draft=false` where listing still shows draft=true). Excluding the
+REM current tag here is the failsafe that prevents the cleanup from
+REM eating the freshly published release.
+powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $repo='%GITHUB_REPO_SLUG%'; $current='v%NEXT_VERSION%'; $drafts = gh release list --repo $repo --limit 100 --json tagName,isDraft | ConvertFrom-Json | Where-Object { $_.isDraft -and $_.tagName -ne $current }; foreach ($draft in $drafts) { Write-Host ('Deleting draft release ' + $draft.tagName + '...'); gh release delete $draft.tagName --repo $repo --yes }"
 if errorlevel 1 (
     echo [release] Failed to remove draft releases.
+    exit /b 1
+)
+REM Final guard: confirm v%NEXT_VERSION% is not in draft state. If it is,
+REM force it to non-draft + Latest and re-emit the URL so the operator
+REM can spot-check it.
+powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $repo='%GITHUB_REPO_SLUG%'; $current='v%NEXT_VERSION%'; $info = gh release view $current --repo $repo --json isDraft,url | ConvertFrom-Json; if ($info.isDraft) { Write-Host ('Re-publishing draft ' + $current + ' as Latest...'); gh release edit $current --repo $repo --draft=false --latest | Out-Null; $info = gh release view $current --repo $repo --json isDraft,url | ConvertFrom-Json; if ($info.isDraft) { throw ('release ' + $current + ' still marked draft after retry') } }; Write-Host ('Final release URL: ' + $info.url)"
+if errorlevel 1 (
+    echo [release] Failed to confirm v%NEXT_VERSION% is published as Latest.
     exit /b 1
 )
 exit /b 0
