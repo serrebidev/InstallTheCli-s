@@ -296,27 +296,45 @@ function Repair-ClaudeAfterFailedUpdate {
             return $false
         }
         $npmBin = $npmBin.Trim()
-        $binDir = Join-Path $npmBin 'node_modules\@anthropic-ai\claude-code\bin'
+        $pkgDir = Join-Path $npmBin 'node_modules\@anthropic-ai\claude-code'
+        $binDir = Join-Path $pkgDir 'bin'
         $claudeExe = Join-Path $binDir 'claude.exe'
         if (-not (Test-Path -LiteralPath $binDir)) {
             return (Test-Path -LiteralPath $claudeExe -PathType Leaf)
         }
 
         $orphans = @(Get-ChildItem -LiteralPath $binDir -Filter 'claude.exe.old.*' -File -ErrorAction SilentlyContinue)
-        if ($orphans.Count -eq 0) {
-            return (Test-Path -LiteralPath $claudeExe -PathType Leaf)
+        if ($orphans.Count -gt 0) {
+            $orphans = $orphans | Sort-Object Name -Descending
+            if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) {
+                $latest = $orphans | Select-Object -First 1
+                try {
+                    Move-Item -LiteralPath $latest.FullName -Destination $claudeExe -Force -ErrorAction Stop
+                    Write-Log "Restored Claude CLI executable from $($latest.Name)."
+                    $orphans = $orphans | Where-Object { $_.FullName -ne $latest.FullName }
+                } catch {
+                    Write-WarnLog "Could not restore Claude CLI executable from orphan: $($_.Exception.Message)"
+                }
+            }
         }
 
-        $orphans = $orphans | Sort-Object Name -Descending
+        # Fallback: copy from the bundled native-arch package when bin/claude.exe
+        # is still missing (no .old orphan to restore from, or restore failed).
         if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) {
-            $latest = $orphans | Select-Object -First 1
-            try {
-                Move-Item -LiteralPath $latest.FullName -Destination $claudeExe -Force -ErrorAction Stop
-                Write-Log "Restored Claude CLI executable from $($latest.Name)."
-                $orphans = $orphans | Where-Object { $_.FullName -ne $latest.FullName }
-            } catch {
-                Write-WarnLog "Could not restore Claude CLI executable: $($_.Exception.Message)"
-                return $false
+            $nativeCandidates = @(
+                (Join-Path $pkgDir 'node_modules\@anthropic-ai\claude-code-win32-x64\claude.exe'),
+                (Join-Path $pkgDir 'node_modules\@anthropic-ai\claude-code-win32-arm64\claude.exe')
+            )
+            foreach ($native in $nativeCandidates) {
+                if (Test-Path -LiteralPath $native -PathType Leaf) {
+                    try {
+                        Copy-Item -LiteralPath $native -Destination $claudeExe -Force -ErrorAction Stop
+                        Write-Log "Restored Claude CLI executable by copying from native package: $native"
+                        break
+                    } catch {
+                        Write-WarnLog "Could not copy native Claude binary $native : $($_.Exception.Message)"
+                    }
+                }
             }
         }
 
@@ -442,37 +460,62 @@ function Test-ClaudeCliRunning {
   }
 }
 
-# Claude's @anthropic-ai/claude-code postinstall (and Claude's own self-updater)
-# rename bin/claude.exe -> bin/claude.exe.old.<ts> before swapping in a new
-# binary. If the swap fails (claude running -> EBUSY, missing platform package,
-# interrupted download), the install is left with no claude.exe and an orphan
-# .old file. Restore the latest .old when claude.exe is missing; clean up stale
-# .old files (each ~250MB) when claude.exe is healthy.
+# Claude's @anthropic-ai/claude-code postinstall (and Claude's own self-updater
+# / the Claude desktop app's winget upgrade) rename bin/claude.exe ->
+# bin/claude.exe.old.<ts> before swapping in a new binary. If the swap fails
+# (claude running -> EBUSY, missing platform package, interrupted download),
+# the install is left with no claude.exe and an orphan .old file. Restore the
+# latest .old when claude.exe is missing; if no orphan is available but the
+# native-arch package is, copy from there; clean up stale .old files (each
+# ~250MB) once claude.exe is healthy.
 function Repair-ClaudeAfterFailedUpdate {
   if (-not $npmPath) { return }
   try {
     $npmBin = & $npmPath prefix -g 2>$null
     if (-not $npmBin) { return }
     $npmBin = $npmBin.Trim()
-    $binDir = Join-Path $npmBin 'node_modules\@anthropic-ai\claude-code\bin'
+    $pkgDir = Join-Path $npmBin 'node_modules\@anthropic-ai\claude-code'
+    $binDir = Join-Path $pkgDir 'bin'
     if (-not (Test-Path -LiteralPath $binDir)) { return }
     $claudeExe = Join-Path $binDir 'claude.exe'
     $orphans = @(Get-ChildItem -LiteralPath $binDir -Filter 'claude.exe.old.*' -File -ErrorAction SilentlyContinue)
-    if ($orphans.Count -eq 0) { return }
-    # `.old.<timestamp>` is monotonic, so name-desc gives the newest first.
-    $orphans = $orphans | Sort-Object Name -Descending
+    if ($orphans.Count -gt 0) {
+      # `.old.<timestamp>` is monotonic, so name-desc gives the newest first.
+      $orphans = $orphans | Sort-Object Name -Descending
+      if (-not (Test-Path -LiteralPath $claudeExe)) {
+        $latest = $orphans | Select-Object -First 1
+        try {
+          Move-Item -LiteralPath $latest.FullName -Destination $claudeExe -Force -ErrorAction Stop
+          $orphans = $orphans | Where-Object { $_.FullName -ne $latest.FullName }
+        } catch { }
+      }
+    }
     if (-not (Test-Path -LiteralPath $claudeExe)) {
-      $latest = $orphans | Select-Object -First 1
-      try {
-        Move-Item -LiteralPath $latest.FullName -Destination $claudeExe -Force -ErrorAction Stop
-        $orphans = $orphans | Where-Object { $_.FullName -ne $latest.FullName }
-      } catch { }
+      $nativeCandidates = @(
+        (Join-Path $pkgDir 'node_modules\@anthropic-ai\claude-code-win32-x64\claude.exe'),
+        (Join-Path $pkgDir 'node_modules\@anthropic-ai\claude-code-win32-arm64\claude.exe')
+      )
+      foreach ($native in $nativeCandidates) {
+        if (Test-Path -LiteralPath $native) {
+          try {
+            Copy-Item -LiteralPath $native -Destination $claudeExe -Force -ErrorAction Stop
+            break
+          } catch { }
+        }
+      }
     }
     foreach ($o in $orphans) {
       Remove-Item -LiteralPath $o.FullName -Force -ErrorAction SilentlyContinue
     }
   } catch { }
 }
+
+# Run Claude bin recovery upfront, before any npm work. The orphan can be
+# left by ANY update path that touches @anthropic-ai/claude-code (the Claude
+# desktop app's winget upgrade, a self-update from inside `claude`, a
+# half-applied npm install). Repairing eagerly lets every startup/logon/daily
+# trigger self-heal.
+Repair-ClaudeAfterFailedUpdate
 
 # `npm i -g <pkg>@latest` is more reliable than `npm update -g`, which can
 # leave packages stale when their dist-tag pinning is unusual (codex / claude
@@ -540,6 +583,32 @@ if (Test-Cmd "winget") {
   & winget upgrade --id Ollama.Ollama -e --accept-package-agreements --accept-source-agreements --silent --disable-interactivity *>&1 | Out-Null
 }
 '@
+}
+
+function Test-AutoUpdateTaskExists {
+    try {
+        $existing = Get-ScheduledTask -TaskName $AutoUpdateTaskName -ErrorAction SilentlyContinue
+        return $null -ne $existing
+    } catch {
+        return $false
+    }
+}
+
+# Auto-upgrade path: if a previous version of InstallTheCli has already
+# registered the hidden auto-update task on this machine, rewrite the
+# embedded updater script and re-register the task in place using the
+# CURRENT logic. This makes shipping fixes (like the Claude bin recovery
+# additions) propagate the next time the user runs install-all OR opens
+# the GUI, without forcing them to manually re-run setup-updater.
+function Refresh-AutoUpdateTaskIfPresent {
+    if ($NoAutoUpdate -or $DryRun) { return }
+    if (-not (Test-AutoUpdateTaskExists)) { return }
+    try {
+        Ensure-HiddenAutoUpdateTask
+        Write-Log 'Auto-upgraded existing hidden auto-update task in place.'
+    } catch {
+        Write-WarnLog "Auto-update task refresh skipped: $($_.Exception.Message)"
+    }
 }
 
 function Ensure-HiddenAutoUpdateTask {
@@ -661,6 +730,14 @@ function Main {
     Write-Log "Subcommand: $normalizedCommand"
     if ($normalizedCommand -eq 'install') { Write-Log "Target: $normalizedTarget" }
     if ($DryRun) { Write-Log 'Dry-run enabled. Commands will be printed only.' }
+
+    # Auto-upgrade an existing hidden auto-update task to the current
+    # updater script. Runs for every subcommand that does real work, so
+    # users who already configured the task in a prior release pick up
+    # fixes (e.g. Claude bin recovery improvements) automatically the
+    # next time they run install-all or any install/setup-updater
+    # subcommand. Idempotent: does nothing if the task isn't registered.
+    Refresh-AutoUpdateTaskIfPresent
 
     switch ($normalizedCommand) {
         'install-all' {

@@ -585,6 +585,25 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("existing claude.exe was restored", script)
         self.assertIn("claude.exe.old.*", script)
         self.assertIn("@anthropic-ai\\claude-code", script)
+        # Native-arch fallback covers the case where the .old orphan is gone
+        # but the optional native package is still on disk (e.g. winget
+        # upgrade of the Claude desktop app left this state behind).
+        self.assertIn("claude-code-win32-x64", script)
+        self.assertIn("claude-code-win32-arm64", script)
+        # Embedded updater calls the repair eagerly at script start so that
+        # every startup/logon/daily trigger self-heals, not just runs that
+        # touch claude via npm.
+        self.assertIn(
+            "# Run Claude bin recovery upfront, before any npm work.",
+            script,
+        )
+        # Auto-upgrade existing scheduled tasks: when the user runs install-all
+        # (or any subcommand that does work) and a previous version of the
+        # task is registered, we re-register it in place using the CURRENT
+        # updater logic. Idempotent and non-fatal.
+        self.assertIn("function Test-AutoUpdateTaskExists", script)
+        self.assertIn("function Refresh-AutoUpdateTaskIfPresent", script)
+        self.assertIn("Refresh-AutoUpdateTaskIfPresent", script)
         self.assertIn("one_click_update_windows.vbs", script)
         self.assertIn("New-ScheduledTaskAction -Execute 'wscript.exe'", script)
         self.assertIn("bundle\\gemini.js", script)
@@ -1509,6 +1528,150 @@ class CommandAndDetectionTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(claude_exe))
             self.assertFalse(os.path.exists(orphan))
 
+    def test_repair_claude_after_failed_update_falls_back_to_native_binary(self) -> None:
+        # When claude.exe is missing AND no .old.<ts> orphan is present, copy
+        # from the bundled @anthropic-ai/claude-code-win32-x64 native package.
+        # This covers the case where a previous repair ran and consumed the
+        # orphan, but the bin entrypoint went missing again afterwards.
+        logs: list[str] = []
+        with tempfile.TemporaryDirectory() as prefix:
+            pkg_dir = os.path.join(prefix, "node_modules", "@anthropic-ai", "claude-code")
+            bin_dir = os.path.join(pkg_dir, "bin")
+            native_dir = os.path.join(
+                pkg_dir, "node_modules", "@anthropic-ai", "claude-code-win32-x64"
+            )
+            os.makedirs(bin_dir)
+            os.makedirs(native_dir)
+            native_exe = os.path.join(native_dir, "claude.exe")
+            with open(native_exe, "w", encoding="utf-8") as f:
+                f.write("native-binary")
+
+            with (
+                patch.object(m, "is_windows", return_value=True),
+                patch.object(m, "get_npm_global_prefix", return_value=prefix),
+            ):
+                healthy = m.repair_claude_after_failed_update("npm.cmd", logs.append)
+
+            claude_exe = os.path.join(bin_dir, "claude.exe")
+            self.assertTrue(healthy)
+            with open(claude_exe, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "native-binary")
+            self.assertTrue(any("copying from native package" in line for line in logs))
+
+    def test_refresh_existing_cli_auto_update_task_skips_when_no_task_or_state(self) -> None:
+        logs: list[str] = []
+        with (
+            tempfile.TemporaryDirectory() as support_dir,
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "is_macos", return_value=False),
+            patch.object(m, "get_app_support_directory", return_value=support_dir),
+            patch.object(m, "_windows_scheduled_task_exists", return_value=False),
+            patch.object(m.subprocess, "run") as run_mock,
+        ):
+            refreshed = m.refresh_existing_cli_auto_update_task(logs.append)
+        self.assertFalse(refreshed)
+        run_mock.assert_not_called()
+
+    def test_refresh_existing_cli_auto_update_task_re_registers_when_task_present(self) -> None:
+        logs: list[str] = []
+        with tempfile.TemporaryDirectory() as support_dir:
+            packages_file = os.path.join(support_dir, m.AUTO_UPDATE_PACKAGES_FILE)
+            with open(packages_file, "w", encoding="utf-8") as f:
+                f.write("@anthropic-ai/claude-code\n@openai/codex\n")
+
+            with (
+                patch.object(m, "is_windows", return_value=True),
+                patch.object(m, "is_macos", return_value=False),
+                patch.object(m, "get_app_support_directory", return_value=support_dir),
+                patch.object(m, "_windows_scheduled_task_exists", return_value=True),
+                patch.object(m, "find_npm", return_value=r"C:\Program Files\nodejs\npm.cmd"),
+                patch.object(
+                    m.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+                ) as run_mock,
+            ):
+                refreshed = m.refresh_existing_cli_auto_update_task(logs.append)
+
+            self.assertTrue(refreshed)
+            run_mock.assert_called_once()
+            cmd = run_mock.call_args.args[0]
+            self.assertEqual(cmd[0], "powershell")
+            joined = " ".join(cmd)
+            self.assertIn("Register-ScheduledTask", joined)
+            self.assertIn(m.AUTO_UPDATE_TASK_NAME, joined)
+            # Updater script and VBS files should be written with the current logic.
+            self.assertTrue(os.path.isfile(os.path.join(support_dir, m.AUTO_UPDATE_SCRIPT_FILE)))
+            self.assertTrue(os.path.isfile(os.path.join(support_dir, m.AUTO_UPDATE_VBS_FILE)))
+        self.assertTrue(any("Refreshed hidden CLI auto-update task" in line for line in logs))
+
+    def test_refresh_existing_cli_auto_update_task_swallows_powershell_failure(self) -> None:
+        logs: list[str] = []
+        with tempfile.TemporaryDirectory() as support_dir:
+            packages_file = os.path.join(support_dir, m.AUTO_UPDATE_PACKAGES_FILE)
+            with open(packages_file, "w", encoding="utf-8") as f:
+                f.write("@anthropic-ai/claude-code\n")
+
+            err = subprocess.CalledProcessError(returncode=1, cmd=["powershell"], stderr="boom")
+            with (
+                patch.object(m, "is_windows", return_value=True),
+                patch.object(m, "is_macos", return_value=False),
+                patch.object(m, "get_app_support_directory", return_value=support_dir),
+                patch.object(m, "_windows_scheduled_task_exists", return_value=True),
+                patch.object(m, "find_npm", return_value=r"C:\Program Files\nodejs\npm.cmd"),
+                patch.object(m.subprocess, "run", side_effect=err),
+            ):
+                refreshed = m.refresh_existing_cli_auto_update_task(logs.append)
+
+        self.assertFalse(refreshed)
+        self.assertTrue(any("Auto-update task refresh skipped" in line for line in logs))
+
+    def test_refresh_existing_cli_auto_update_task_returns_false_on_non_windows_non_macos(self) -> None:
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=False),
+        ):
+            self.assertFalse(m.refresh_existing_cli_auto_update_task(lambda _msg: None))
+
+    def test_repair_claude_after_failed_update_native_fallback_runs_when_orphan_restore_fails(self) -> None:
+        # Even if the .old orphan exists but cannot be moved (e.g. concurrent
+        # access / locked), the native package fallback should kick in so we
+        # still end up with a working bin/claude.exe.
+        logs: list[str] = []
+        with tempfile.TemporaryDirectory() as prefix:
+            pkg_dir = os.path.join(prefix, "node_modules", "@anthropic-ai", "claude-code")
+            bin_dir = os.path.join(pkg_dir, "bin")
+            native_dir = os.path.join(
+                pkg_dir, "node_modules", "@anthropic-ai", "claude-code-win32-x64"
+            )
+            os.makedirs(bin_dir)
+            os.makedirs(native_dir)
+            orphan = os.path.join(bin_dir, "claude.exe.old.100")
+            native_exe = os.path.join(native_dir, "claude.exe")
+            with open(orphan, "w", encoding="utf-8") as f:
+                f.write("old")
+            with open(native_exe, "w", encoding="utf-8") as f:
+                f.write("native-binary")
+
+            real_replace = m.os.replace
+
+            def replace_failing_for_orphan(src: str, dst: str) -> None:
+                if src == orphan:
+                    raise OSError("simulated lock")
+                real_replace(src, dst)
+
+            with (
+                patch.object(m, "is_windows", return_value=True),
+                patch.object(m, "get_npm_global_prefix", return_value=prefix),
+                patch.object(m.os, "replace", side_effect=replace_failing_for_orphan),
+            ):
+                healthy = m.repair_claude_after_failed_update("npm.cmd", logs.append)
+
+            claude_exe = os.path.join(bin_dir, "claude.exe")
+            self.assertTrue(healthy)
+            with open(claude_exe, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "native-binary")
+
     def test_npm_uninstall_global_delegates_to_run_command(self) -> None:
         with (
             patch.object(m, "run_command", return_value=0) as run_mock,
@@ -1967,8 +2130,20 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
         self.assertIn("function Repair-ClaudeAfterFailedUpdate", script)
         self.assertIn("$pkg -eq '@anthropic-ai/claude-code'", script)
         self.assertIn("claude.exe.old.*", script)
-        self.assertIn("node_modules\\@anthropic-ai\\claude-code\\bin", script)
+        self.assertIn("node_modules\\@anthropic-ai\\claude-code'", script)
         self.assertIn("if (Test-ClaudeCliRunning) { continue }", script)
+        # Native-arch fallback: when bin/claude.exe is missing AND no .old
+        # orphan can be restored, copy from the bundled platform package.
+        # This handles cleanup-leftover or partial-postinstall states where
+        # the orphan-based recovery alone is not enough.
+        self.assertIn("claude-code-win32-x64", script)
+        self.assertIn("claude-code-win32-arm64", script)
+        # Eager invocation: the recovery must run BEFORE the package list is
+        # consulted, so any auto-update trigger (startup/logon/daily) self-heals
+        # even when the user's $packages file does not include Claude. The
+        # call must be a bare statement, not part of the foreach loop.
+        eager_marker = "Repair-ClaudeAfterFailedUpdate\n$packagesFile ="
+        self.assertIn(eager_marker, script)
         # Gemini shim regen guarded on @google/gemini-cli being in the package set
         self.assertIn("$packages -contains '@google/gemini-cli'", script)
         self.assertIn("Set-Content -LiteralPath (Join-Path $npmBin 'gemini.cmd')", script)

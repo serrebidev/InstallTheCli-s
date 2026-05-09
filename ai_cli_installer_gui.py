@@ -659,24 +659,51 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "  try {",
         "    $prefix = Get-NpmPrefix",
         "    if (-not $prefix) { return }",
-        "    $binDir = Join-Path $prefix 'node_modules\\@anthropic-ai\\claude-code\\bin'",
+        "    $pkgDir = Join-Path $prefix 'node_modules\\@anthropic-ai\\claude-code'",
+        "    $binDir = Join-Path $pkgDir 'bin'",
         "    if (-not (Test-Path -LiteralPath $binDir)) { return }",
         "    $claudeExe = Join-Path $binDir 'claude.exe'",
         "    $orphans = @(Get-ChildItem -LiteralPath $binDir -Filter 'claude.exe.old.*' -File -ErrorAction SilentlyContinue)",
-        "    if ($orphans.Count -eq 0) { return }",
-        "    $orphans = $orphans | Sort-Object Name -Descending",
+        "    if ($orphans.Count -gt 0) {",
+        "      $orphans = $orphans | Sort-Object Name -Descending",
+        "      if (-not (Test-Path -LiteralPath $claudeExe)) {",
+        "        $latest = $orphans | Select-Object -First 1",
+        "        try {",
+        "          Move-Item -LiteralPath $latest.FullName -Destination $claudeExe -Force -ErrorAction Stop",
+        "          $orphans = $orphans | Where-Object { $_.FullName -ne $latest.FullName }",
+        "        } catch { }",
+        "      }",
+        "    }",
+        # Fallback: if claude.exe is still missing, copy from the optional
+        # native-arch package bundled under node_modules/. The .old file may
+        # already be gone (cleaned up earlier), or the rename half completed.
         "    if (-not (Test-Path -LiteralPath $claudeExe)) {",
-        "      $latest = $orphans | Select-Object -First 1",
-        "      try {",
-        "        Move-Item -LiteralPath $latest.FullName -Destination $claudeExe -Force -ErrorAction Stop",
-        "        $orphans = $orphans | Where-Object { $_.FullName -ne $latest.FullName }",
-        "      } catch { }",
+        "      $nativeCandidates = @(",
+        "        (Join-Path $pkgDir 'node_modules\\@anthropic-ai\\claude-code-win32-x64\\claude.exe'),",
+        "        (Join-Path $pkgDir 'node_modules\\@anthropic-ai\\claude-code-win32-arm64\\claude.exe')",
+        "      )",
+        "      foreach ($native in $nativeCandidates) {",
+        "        if (Test-Path -LiteralPath $native) {",
+        "          try {",
+        "            Copy-Item -LiteralPath $native -Destination $claudeExe -Force -ErrorAction Stop",
+        "            break",
+        "          } catch { }",
+        "        }",
+        "      }",
         "    }",
         "    foreach ($o in $orphans) {",
         "      Remove-Item -LiteralPath $o.FullName -Force -ErrorAction SilentlyContinue",
         "    }",
         "  } catch { }",
         "}",
+        # Run a Claude bin recovery upfront, before reading $packages or doing
+        # any npm work. The orphan claude.exe.old.<ts> can be left behind by
+        # ANY update path that touches @anthropic-ai/claude-code (the Claude
+        # desktop app's winget update, a self-update from inside `claude`, a
+        # half-applied npm install). By repairing eagerly we ensure this
+        # scheduled task self-heals at every startup/logon/daily run, even
+        # when the user's $packages list does not include Claude.
+        "Repair-ClaudeAfterFailedUpdate",
         f"$packagesFile = {powershell_single_quote(packages_file)}",
         "if (-not (Test-Path -LiteralPath $packagesFile)) { exit 0 }",
         "$packages = Get-Content -LiteralPath $packagesFile -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() } | Where-Object { $_ }",
@@ -816,6 +843,143 @@ def ensure_cli_auto_update_task(
         + ")."
     )
     return merged_packages
+
+
+def refresh_existing_cli_auto_update_task(log: Callable[[str], None]) -> bool:
+    """Re-deploy the hidden CLI auto-update task in place using the current
+    embedded updater logic, but only if the task is already configured.
+
+    This lets us roll out improvements to the updater script (e.g. better
+    Claude bin recovery) automatically the next time the GUI is opened or
+    `install-all` is run, without forcing the user to re-add packages or run
+    `setup-updater` manually. We treat the existing packages file as the
+    source of truth for which CLIs to update.
+
+    Returns True if a refresh actually ran (existing task was found and
+    re-registered). Returns False on platforms without scheduling support,
+    when no existing configuration is detected, or on transient failures.
+    The function is intentionally non-fatal -- a failure here should never
+    block the GUI from opening or stop a one-click install.
+    """
+    if is_macos():
+        return _refresh_existing_macos_cli_auto_update_task(log)
+    if not is_windows():
+        return False
+
+    support_dir = get_app_support_directory()
+    packages_file = os.path.join(support_dir, AUTO_UPDATE_PACKAGES_FILE)
+    script_file = os.path.join(support_dir, AUTO_UPDATE_SCRIPT_FILE)
+    vbs_file = os.path.join(support_dir, AUTO_UPDATE_VBS_FILE)
+
+    task_present = _windows_scheduled_task_exists(AUTO_UPDATE_TASK_NAME)
+    has_packages_state = os.path.isfile(packages_file)
+    if not task_present and not has_packages_state:
+        return False
+
+    existing_packages = read_nonempty_lines(packages_file) if has_packages_state else []
+    if not existing_packages:
+        # The task exists but we have no record of which packages it should
+        # update. Refresh the script/VBS anyway so future installs land on
+        # the new logic, but skip task re-registration since there is no
+        # behavior to enforce.
+        return False
+
+    npm_exe = find_npm() or "npm.cmd"
+    try:
+        os.makedirs(support_dir, exist_ok=True)
+        write_text_file(script_file, build_cli_auto_update_script(npm_exe, packages_file))
+        write_text_file(vbs_file, build_cli_auto_update_vbs(script_file))
+    except OSError as exc:
+        log(f"Auto-update task refresh skipped: could not rewrite updater files: {exc}")
+        return False
+
+    if not task_present:
+        # Files refreshed, but no task to update. Leave registration to the
+        # next install run rather than silently creating a task.
+        return False
+
+    action_args = f'"{vbs_file}" //nologo'
+    register_lines = [
+        "$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name",
+        f"$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument {powershell_single_quote(action_args)}",
+        "$triggerStartup = New-ScheduledTaskTrigger -AtStartup",
+        "$triggerLogon = New-ScheduledTaskTrigger -AtLogOn",
+        f"$triggerDaily = New-ScheduledTaskTrigger -Daily -At {powershell_single_quote(AUTO_UPDATE_DAILY_TIME)}",
+        "$settings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
+        "$principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Limited",
+        "Register-ScheduledTask "
+        + f"-TaskName {powershell_single_quote(AUTO_UPDATE_TASK_NAME)} "
+        + "-Action $action "
+        + "-Trigger @($triggerStartup, $triggerLogon, $triggerDaily) "
+        + "-Settings $settings "
+        + "-Principal $principal "
+        + f"-Description {powershell_single_quote('Hidden npm AI CLI auto-update (refreshed by InstallTheCli on app open / install-all).')} "
+        + "-Force | Out-Null",
+    ]
+
+    try:
+        subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "; ".join(register_lines),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            **subprocess_creationflags_kwargs(),
+        )
+    except (subprocess.CalledProcessError, OSError) as exc:
+        detail = ""
+        if isinstance(exc, subprocess.CalledProcessError):
+            detail = (exc.stderr or exc.stdout or "").strip()
+        log(
+            "Auto-update task refresh skipped: re-registration failed."
+            + (f" {detail}" if detail else f" {exc}")
+        )
+        return False
+
+    log(
+        "Refreshed hidden CLI auto-update task in place "
+        f"({len(existing_packages)} package(s); startup, logon, daily "
+        + AUTO_UPDATE_DAILY_TIME
+        + ")."
+    )
+    return True
+
+
+def _windows_scheduled_task_exists(task_name: str) -> bool:
+    if not is_windows():
+        return False
+    try:
+        completed = subprocess.run(
+            ["schtasks.exe", "/Query", "/TN", task_name],
+            capture_output=True,
+            text=True,
+            **subprocess_creationflags_kwargs(),
+        )
+    except OSError:
+        return False
+    return completed.returncode == 0
+
+
+def _refresh_existing_macos_cli_auto_update_task(log: Callable[[str], None]) -> bool:
+    if not is_macos():
+        return False
+    plist_path = os.path.join(
+        os.path.expanduser("~/Library/LaunchAgents"), MACOS_AUTO_UPDATE_PLIST_FILE
+    )
+    if not os.path.isfile(plist_path):
+        return False
+    try:
+        ensure_macos_cli_auto_update_task(log)
+    except Exception as exc:  # noqa: BLE001 -- never block GUI startup
+        log(f"Auto-update LaunchAgent refresh skipped: {exc}")
+        return False
+    return True
 
 
 def build_macos_cli_auto_update_script() -> str:
@@ -1374,21 +1538,23 @@ def repair_claude_after_failed_update(npm_exe: str, log: Callable[[str], None]) 
     if not prefix:
         return False
 
-    bin_dir = os.path.join(prefix, "node_modules", "@anthropic-ai", "claude-code", "bin")
+    pkg_dir = os.path.join(prefix, "node_modules", "@anthropic-ai", "claude-code")
+    bin_dir = os.path.join(pkg_dir, "bin")
     claude_exe = os.path.join(bin_dir, "claude.exe")
     if not os.path.isdir(bin_dir):
         return os.path.isfile(claude_exe)
 
-    orphans = [
-        path
-        for path in glob.glob(os.path.join(bin_dir, "claude.exe.old.*"))
-        if os.path.isfile(path)
-    ]
-    if not orphans:
-        return os.path.isfile(claude_exe)
+    orphans = sorted(
+        (
+            path
+            for path in glob.glob(os.path.join(bin_dir, "claude.exe.old.*"))
+            if os.path.isfile(path)
+        ),
+        key=lambda path: os.path.basename(path),
+        reverse=True,
+    )
 
-    orphans.sort(key=lambda path: os.path.basename(path), reverse=True)
-    if not os.path.isfile(claude_exe):
+    if not os.path.isfile(claude_exe) and orphans:
         latest = orphans[0]
         try:
             os.replace(latest, claude_exe)
@@ -1396,7 +1562,30 @@ def repair_claude_after_failed_update(npm_exe: str, log: Callable[[str], None]) 
             orphans = orphans[1:]
         except OSError as exc:
             log(f"Warning: could not restore Claude CLI executable: {exc}")
-            return False
+
+    # Fall back to copying from the optional native-arch package when the
+    # bin/claude.exe is still missing (e.g. the .old file is gone, or the
+    # rename succeeded but the new download never landed). The native
+    # package ships the same Win32 binary that the postinstall normally
+    # hard-links into bin/claude.exe.
+    if not os.path.isfile(claude_exe):
+        native_candidates = (
+            os.path.join(
+                pkg_dir, "node_modules", "@anthropic-ai", "claude-code-win32-x64", "claude.exe"
+            ),
+            os.path.join(
+                pkg_dir, "node_modules", "@anthropic-ai", "claude-code-win32-arm64", "claude.exe"
+            ),
+        )
+        for native in native_candidates:
+            if not os.path.isfile(native):
+                continue
+            try:
+                shutil.copyfile(native, claude_exe)
+                log(f"Restored Claude CLI executable by copying from native package: {native}")
+                break
+            except OSError as exc:
+                log(f"Warning: could not copy native Claude binary {native}: {exc}")
 
     for orphan in orphans:
         try:
@@ -3075,6 +3264,15 @@ class InstallerFrame(wx.Frame):
         self._reset_persistent_log_for_new_run()
         self._build_ui()
         self.Centre()
+        # Auto-upgrade an existing hidden auto-update task to the current
+        # updater logic. This is fully automatic on app open: if the user
+        # already has the task from an older InstallTheCli release, we
+        # rewrite the embedded updater script and re-register the task in
+        # place. Failures are non-fatal and only logged.
+        try:
+            refresh_existing_cli_auto_update_task(self.log)
+        except Exception as exc:  # noqa: BLE001 -- never block GUI startup
+            self.log(f"Auto-update task refresh skipped on startup: {exc}")
 
     def _build_ui(self) -> None:  # pragma: no cover
         panel = wx.Panel(self)
