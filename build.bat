@@ -45,7 +45,7 @@ exit /b 0
 
 :compute_next_version
 set "NEXT_VERSION="
-for /f "delims=" %%V in ('powershell -NoProfile -Command "$tags = git tag --list 'v*.*.*'; $versions = foreach ($tag in $tags) { try { [version]($tag -replace '^v','') } catch {} }; $latest = $versions ^| Sort-Object -Descending ^| Select-Object -First 1; if ($latest) { '{0}.{1}.{2}' -f $latest.Major, $latest.Minor, ($latest.Build + 1) } else { '1.0.0' }"') do set "NEXT_VERSION=%%V"
+for /f "delims=" %%V in ('powershell -NoProfile -Command "$tags = git tag --list 'v*.*.*'; $versions = foreach ($tag in $tags) { try { [version]($tag -replace '^v','') } catch {} }; $latest = $versions | Sort-Object -Descending | Select-Object -First 1; if ($latest) { '{0}.{1}.{2}' -f $latest.Major, $latest.Minor, ($latest.Build + 1) } else { '1.0.0' }"') do set "NEXT_VERSION=%%V"
 if "%NEXT_VERSION%"=="" (
     echo [release] Failed to compute next version.
     exit /b 1
@@ -80,7 +80,7 @@ for %%F in (install_all_windows.ps1 install_all_macos.sh install_all_linux.sh) d
     if exist "%%F" copy /Y "%%F" "%RELEASE_DIR%\%%F" >nul
 )
 set "SUMS_PATH=%RELEASE_DIR%\%APP_NAME%-v%NEXT_VERSION%-SHA256SUMS.txt"
-powershell -NoProfile -Command "Get-ChildItem -LiteralPath '%RELEASE_DIR%' -File ^| Sort-Object Name ^| ForEach-Object { '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant(), $_.Name } ^| Set-Content -LiteralPath '%SUMS_PATH%' -Encoding ascii"
+powershell -NoProfile -Command "Get-ChildItem -LiteralPath '%RELEASE_DIR%' -File | Sort-Object Name | ForEach-Object { '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant(), $_.Name } | Set-Content -LiteralPath '%SUMS_PATH%' -Encoding ascii"
 if errorlevel 1 exit /b 1
 set "NOTES_PATH=%RELEASE_DIR%\release-notes-v%NEXT_VERSION%.md"
 (
@@ -125,7 +125,7 @@ exit /b 0
 
 :delete_draft_releases
 echo [release] Checking for draft releases in %GITHUB_REPO_SLUG%...
-powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $repo='%GITHUB_REPO_SLUG%'; $drafts = gh release list --repo $repo --limit 100 --json tagName,isDraft ^| ConvertFrom-Json ^| Where-Object { $_.isDraft }; foreach ($draft in $drafts) { Write-Host ('Deleting draft release ' + $draft.tagName + '...'); gh release delete $draft.tagName --repo $repo --yes }"
+powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $repo='%GITHUB_REPO_SLUG%'; $drafts = gh release list --repo $repo --limit 100 --json tagName,isDraft | ConvertFrom-Json | Where-Object { $_.isDraft }; foreach ($draft in $drafts) { Write-Host ('Deleting draft release ' + $draft.tagName + '...'); gh release delete $draft.tagName --repo $repo --yes }"
 if errorlevel 1 (
     echo [release] Failed to remove draft releases.
     exit /b 1
