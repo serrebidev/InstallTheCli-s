@@ -568,12 +568,15 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("Get-Help .\\install_all_windows.ps1 -Detailed", script)
         self.assertIn("install-all", script)
         self.assertIn("install <target>", script)
+        self.assertIn("copilot/openclaw/ironclaw/mistral", script)
         self.assertIn("setup-updater", script)
         self.assertIn("--no-update-notifier", script)
         self.assertIn("if (-not $DryRun)", script)
         self.assertIn("Get-NpmPath", script)
         self.assertIn('i -g ("$pkg@latest")', script)
         self.assertIn("Test-CodexCliRunning", script)
+        self.assertIn("Stop-CodexCliForUpdate", script)
+        self.assertIn("closing process(es) before update", script)
         self.assertIn("Remove-CodexNpmTempDirs", script)
         self.assertIn(".codex-*", script)
         # Claude updates need the same protection: skip while running, restore
@@ -1672,6 +1675,58 @@ class CommandAndDetectionTests(unittest.TestCase):
             with open(claude_exe, "r", encoding="utf-8") as f:
                 self.assertEqual(f.read(), "native-binary")
 
+    def test_remove_codex_npm_temp_dirs_removes_only_safe_temp_dirs(self) -> None:
+        logs: list[str] = []
+        with tempfile.TemporaryDirectory() as prefix:
+            openai_root = os.path.join(prefix, "node_modules", "@openai")
+            temp_dir = os.path.join(openai_root, ".codex-stale")
+            real_dir = os.path.join(openai_root, "codex")
+            os.makedirs(temp_dir)
+            os.makedirs(real_dir)
+
+            with (
+                patch.object(m, "is_windows", return_value=True),
+                patch.object(m, "get_npm_global_prefix", return_value=prefix),
+            ):
+                m.remove_codex_npm_temp_dirs("npm.cmd", logs.append)
+
+            self.assertFalse(os.path.exists(temp_dir))
+            self.assertTrue(os.path.isdir(real_dir))
+            self.assertTrue(any("Removed stale Codex npm temp directory" in line for line in logs))
+
+    def test_remove_codex_npm_temp_dirs_noops_off_windows(self) -> None:
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "get_npm_global_prefix") as prefix_mock,
+        ):
+            m.remove_codex_npm_temp_dirs("npm.cmd", lambda _msg: None)
+        prefix_mock.assert_not_called()
+
+    def test_close_codex_cli_for_update_invokes_powershell_stop_process(self) -> None:
+        logs: list[str] = []
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "run_command", return_value=0) as run_mock,
+        ):
+            ok = m.close_codex_cli_for_update(logs.append, timeout_seconds=7)
+
+        self.assertTrue(ok)
+        args = run_mock.call_args.args[0]
+        self.assertEqual(args[:4], ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass"])
+        script = args[-1]
+        self.assertIn("Get-CodexCliProcesses", script)
+        self.assertIn("Stop-Process -Id $processId -Force", script)
+        self.assertIn("AddSeconds(7)", script)
+        self.assertIn("Start-Sleep -Seconds 1", script)
+
+    def test_close_codex_cli_for_update_noops_off_windows(self) -> None:
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "run_command") as run_mock,
+        ):
+            self.assertTrue(m.close_codex_cli_for_update(lambda _msg: None))
+        run_mock.assert_not_called()
+
     def test_npm_uninstall_global_delegates_to_run_command(self) -> None:
         with (
             patch.object(m, "run_command", return_value=0) as run_mock,
@@ -1739,6 +1794,40 @@ class CommandAndDetectionTests(unittest.TestCase):
         self.assertEqual(pkg, "@anthropic-ai/claude-code")
         self.assertEqual(repair_mock.call_count, 2)
         self.assertTrue(any("existing claude.exe was restored" in line for line in logs))
+
+    def test_try_install_package_candidates_closes_codex_before_install(self) -> None:
+        logs: list[str] = []
+        codex = next(spec for spec in m.CLI_SPECS if spec.key == "codex")
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "remove_codex_npm_temp_dirs") as cleanup_mock,
+            patch.object(m, "close_codex_cli_for_update", return_value=True) as close_mock,
+            patch.object(m, "npm_install_global", return_value=0) as npm_mock,
+        ):
+            success, pkg = m.try_install_package_candidates("npm.cmd", codex, logs.append)
+
+        self.assertTrue(success)
+        self.assertEqual(pkg, "@openai/codex")
+        close_mock.assert_called_once()
+        self.assertEqual(npm_mock.call_args.args[:2], ("npm.cmd", "@openai/codex"))
+        self.assertEqual(cleanup_mock.call_count, 2)
+
+    def test_try_install_package_candidates_stops_if_codex_will_not_close(self) -> None:
+        logs: list[str] = []
+        codex = next(spec for spec in m.CLI_SPECS if spec.key == "codex")
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "remove_codex_npm_temp_dirs"),
+            patch.object(m, "close_codex_cli_for_update", return_value=False) as close_mock,
+            patch.object(m, "npm_install_global") as npm_mock,
+        ):
+            success, err = m.try_install_package_candidates("npm.cmd", codex, logs.append)
+
+        self.assertFalse(success)
+        self.assertEqual(err, "Codex CLI could not be closed before npm install/update")
+        close_mock.assert_called_once()
+        npm_mock.assert_not_called()
+        self.assertIn(str(err), logs)
 
     def test_try_install_package_candidates_rejects_successful_claude_install_without_exe(self) -> None:
         logs: list[str] = []
@@ -1844,6 +1933,9 @@ class CommandAndDetectionTests(unittest.TestCase):
         logs: list[str] = []
         codex = next(spec for spec in m.CLI_SPECS if spec.key == "codex")
         with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "remove_codex_npm_temp_dirs"),
+            patch.object(m, "close_codex_cli_for_update", return_value=True),
             patch.object(m, "npm_install_global", side_effect=[4294963214, 0]) as npm_mock,
             patch.object(m.time, "sleep") as sleep_mock,
         ):
@@ -2117,12 +2209,16 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
         self.assertIn('"$pkg@latest"', script)
         self.assertIn("function Get-NpmPath", script)
         self.assertIn("nodejs\\npm.cmd", script)
-        # Codex updates are skipped while Codex is active to avoid Windows
-        # locking codex.exe and leaving npm .codex-* temp directories behind.
+        # Codex updates close active Codex processes before npm touches
+        # codex.exe, then clean stale npm .codex-* temp directories.
+        self.assertIn("function Get-CodexCliProcesses", script)
         self.assertIn("function Test-CodexCliRunning", script)
+        self.assertIn("function Stop-CodexCliForUpdate", script)
+        self.assertIn("Stop-Process -Id $processId -Force", script)
         self.assertIn("function Remove-CodexNpmTempDirs", script)
         self.assertIn("$pkg -eq '@openai/codex'", script)
         self.assertIn(".codex-*", script)
+        self.assertIn("Stop-CodexCliForUpdate", script)
         self.assertIn("if (Test-CodexCliRunning) { continue }", script)
         # Same pattern for claude: skip while running, plus recover bin/claude.exe
         # from a stranded claude.exe.old.<ts> if a prior swap failed half-way.

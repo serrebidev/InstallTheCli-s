@@ -630,15 +630,26 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "    }",
         "  } catch { }",
         "}",
-        "function Test-CodexCliRunning {",
+        "function Get-CodexCliProcesses {",
         "  try {",
-        "    $matches = Get-CimInstance Win32_Process -Filter \"name = 'codex.exe' or name = 'node.exe'\" -ErrorAction SilentlyContinue | Where-Object {",
+        "    return @(Get-CimInstance Win32_Process -Filter \"name = 'codex.exe' or name = 'node.exe'\" -ErrorAction SilentlyContinue | Where-Object {",
         "      $_.Name -ieq 'codex.exe' -or ([string]$_.CommandLine) -match '\\\\@openai\\\\codex\\\\bin\\\\codex\\.js'",
-        "    } | Select-Object -First 1",
-        "    return $null -ne $matches",
+        "    })",
         "  } catch {",
-        "    return $false",
+        "    return @()",
         "  }",
+        "}",
+        "function Test-CodexCliRunning {",
+        "  return @(Get-CodexCliProcesses).Count -gt 0",
+        "}",
+        "function Stop-CodexCliForUpdate {",
+        "  $matches = @(Get-CodexCliProcesses)",
+        "  if ($matches.Count -eq 0) { return }",
+        "  $ids = @($matches | Select-Object -ExpandProperty ProcessId -Unique)",
+        "  foreach ($processId in $ids) { Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue }",
+        "  $deadline = (Get-Date).AddSeconds(30)",
+        "  while ((Get-Date) -lt $deadline -and (Test-CodexCliRunning)) { Start-Sleep -Milliseconds 500 }",
+        "  if (-not (Test-CodexCliRunning)) { Start-Sleep -Seconds 1 }",
         "}",
         # Claude self-updater (and the @anthropic-ai/claude-code postinstall)
         # rename bin/claude.exe -> bin/claude.exe.old.<ts> before swapping in
@@ -715,6 +726,7 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "foreach ($pkg in $packages) {",
         f"  if ($pkg -eq {codex_pkg_literal}) {{",
         "    Remove-CodexNpmTempDirs",
+        "    Stop-CodexCliForUpdate",
         "    if (Test-CodexCliRunning) { continue }",
         "  }",
         f"  if ($pkg -eq {claude_pkg_literal}) {{",
@@ -1179,10 +1191,16 @@ def run_command(
         **subprocess_creationflags_kwargs(),
     )
     assert process.stdout is not None
-    for line in process.stdout:
-        text = line.rstrip()
-        if text:
-            log(text)
+    stdout = process.stdout
+    try:
+        for line in stdout:
+            text = line.rstrip()
+            if text:
+                log(text)
+    finally:
+        close_stdout = getattr(stdout, "close", None)
+        if callable(close_stdout):
+            close_stdout()
     return process.wait()
 
 
@@ -1594,6 +1612,78 @@ def repair_claude_after_failed_update(npm_exe: str, log: Callable[[str], None]) 
             log(f"Warning: could not remove stale Claude CLI backup {os.path.basename(orphan)}: {exc}")
 
     return os.path.isfile(claude_exe)
+
+
+def remove_codex_npm_temp_dirs(npm_exe: str, log: Callable[[str], None]) -> None:
+    if not is_windows():
+        return
+
+    prefix = get_npm_global_prefix(npm_exe, log)
+    if not prefix:
+        return
+
+    openai_root = os.path.join(prefix, "node_modules", "@openai")
+    if not os.path.isdir(openai_root):
+        return
+
+    root_full = os.path.abspath(openai_root)
+    root_cmp = os.path.normcase(root_full)
+    try:
+        for name in os.listdir(openai_root):
+            if not name.startswith(".codex-"):
+                continue
+            target = os.path.abspath(os.path.join(openai_root, name))
+            target_cmp = os.path.normcase(target)
+            if not target_cmp.startswith(root_cmp + os.sep) or not os.path.isdir(target):
+                continue
+            try:
+                shutil.rmtree(target)
+                log(f"Removed stale Codex npm temp directory: {target}")
+            except OSError as exc:
+                log(f"Warning: could not remove stale Codex npm temp directory {target}: {exc}")
+    except OSError as exc:
+        log(f"Warning: could not inspect Codex npm temp directories: {exc}")
+
+
+def close_codex_cli_for_update(log: Callable[[str], None], timeout_seconds: int = 30) -> bool:
+    if not is_windows():
+        return True
+
+    script = rf"""
+$ErrorActionPreference = 'SilentlyContinue'
+function Get-CodexCliProcesses {{
+  @(Get-CimInstance Win32_Process -Filter "name = 'codex.exe' or name = 'node.exe'" -ErrorAction SilentlyContinue | Where-Object {{
+    $_.Name -ieq 'codex.exe' -or ([string]$_.CommandLine) -match '\\@openai\\codex\\bin\\codex\.js'
+  }})
+}}
+$matches = @(Get-CodexCliProcesses)
+if ($matches.Count -eq 0) {{
+  Write-Output 'Codex CLI is not running.'
+  exit 0
+}}
+$ids = @($matches | Select-Object -ExpandProperty ProcessId -Unique)
+Write-Output ('Closing Codex CLI process(es) before update: ' + ($ids -join ', '))
+foreach ($processId in $ids) {{
+  Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+}}
+$deadline = (Get-Date).AddSeconds({timeout_seconds})
+while ((Get-Date) -lt $deadline) {{
+  Start-Sleep -Milliseconds 500
+  if (@(Get-CodexCliProcesses).Count -eq 0) {{
+    Start-Sleep -Seconds 1
+    Write-Output 'Codex CLI closed.'
+    exit 0
+  }}
+}}
+$remaining = @(Get-CodexCliProcesses | Select-Object -ExpandProperty ProcessId -Unique)
+Write-Output ('Codex CLI is still running after close request: ' + ($remaining -join ', '))
+exit 1
+""".strip()
+    code = run_command(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        log,
+    )
+    return code == 0
 
 
 def get_cli_bin_dirs(npm_exe: Optional[str], log: Callable[[str], None]) -> list[str]:
@@ -2918,8 +3008,15 @@ def try_install_package_candidates(
     last_error: Optional[str] = None
     for package_name in spec.package_candidates:
         is_claude_package = package_name == CLAUDE_NPM_PACKAGE
+        is_codex_package = package_name == CODEX_NPM_PACKAGE
         if is_claude_package:
             repair_claude_after_failed_update(npm_exe, log)
+        if is_codex_package and is_windows():
+            remove_codex_npm_temp_dirs(npm_exe, log)
+            if not close_codex_cli_for_update(log):
+                last_error = "Codex CLI could not be closed before npm install/update"
+                log(last_error)
+                return (False, last_error)
         for attempt in range(1, NPM_INSTALL_MAX_ATTEMPTS + 1):
             suffix = "" if attempt == 1 else f" (attempt {attempt}/{NPM_INSTALL_MAX_ATTEMPTS})"
             log(f"Trying npm package for {spec.label}: {package_name}{suffix}")
@@ -2927,6 +3024,8 @@ def try_install_package_candidates(
             claude_repaired = False
             if is_claude_package:
                 claude_repaired = repair_claude_after_failed_update(npm_exe, log)
+            if is_codex_package and is_windows():
+                remove_codex_npm_temp_dirs(npm_exe, log)
             if code == 0:
                 if is_claude_package and is_windows() and not claude_repaired:
                     last_error = f"{package_name} installed, but claude.exe was not found"

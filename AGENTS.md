@@ -33,7 +33,7 @@ Auto-update behavior:
   - Triggers: startup, logon, daily (`3:00AM` default)
   - No visible cmd/PowerShell window
   - Launches through `wscript.exe` + `.vbs` so PowerShell stays hidden
-  - Codex updates are skipped while Codex is running; stale npm `.codex-*` temp directories are cleaned when possible
+  - Codex updates close running Codex processes before npm touches `codex.exe`; stale npm `.codex-*` temp directories are cleaned when possible
   - Claude updates are skipped while `claude.exe` is running; orphaned `bin/claude.exe.old.<ts>` files (left by a half-applied swap, when claude.exe is missing) are renamed back to `claude.exe`, and stale `.old.*` files are deleted once `claude.exe` is healthy. If the orphan is gone but the bundled native-arch package (`@anthropic-ai/claude-code-win32-x64` / `-arm64`) is on disk, `bin/claude.exe` is restored by copying from the native binary instead.
   - Claude bin recovery runs eagerly at the start of the embedded updater script (before consulting the per-machine package list), so it fires on every startup/logon/daily trigger even when the rename was caused by something other than this updater (e.g. the Claude desktop app's winget upgrade).
   - Existing hidden auto-update tasks self-upgrade in place: when the GUI is opened, or when `install_all_windows.ps1` runs `install-all` / `install` / `setup-updater`, we detect a registered `InstallTheCli - Update AI CLIs` task and re-register it with the current embedded updater logic. This propagates fixes (like the bin-recovery improvements above) without making users manually re-run setup.

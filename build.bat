@@ -35,7 +35,7 @@ call :compute_next_version || goto :error
 
 if /I "%MODE%"=="dry-run" (
     echo [dry-run] Next version: v%NEXT_VERSION%
-    echo [dry-run] Would run build_exe.bat, package release assets, tag, push, publish the GitHub release as Latest, and delete draft releases.
+    echo [dry-run] Would run build_exe.bat, package release assets, tag, push, and publish the GitHub release as Latest.
     popd
     exit /b 0
 )

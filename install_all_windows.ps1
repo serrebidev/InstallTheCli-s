@@ -14,7 +14,7 @@ Also configures a hidden Scheduled Task (startup, logon, daily) unless disabled.
 Subcommand: install-all (default), install, list, setup-updater, help.
 
 .PARAMETER Target
-Target for the install subcommand: claude, codex, gemini, grok, qwen, copilot, mistral, ollama, all.
+Target for the install subcommand: claude, codex, gemini, grok, qwen, copilot, openclaw, ironclaw, mistral, ollama, all.
 
 .PARAMETER NoAutoUpdate
 Skips creation/update of the hidden scheduled auto-update task.
@@ -348,6 +348,72 @@ function Repair-ClaudeAfterFailedUpdate {
     }
 }
 
+function Get-CodexCliProcesses {
+    try {
+        return @(Get-CimInstance Win32_Process -Filter "name = 'codex.exe' or name = 'node.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -ieq 'codex.exe' -or ([string]$_.CommandLine) -match '\\@openai\\codex\\bin\\codex\.js'
+        })
+    } catch {
+        return @()
+    }
+}
+
+function Test-CodexCliRunning {
+    return @(Get-CodexCliProcesses).Count -gt 0
+}
+
+function Stop-CodexCliForUpdate {
+    $matches = @(Get-CodexCliProcesses)
+    if ($matches.Count -eq 0) {
+        return
+    }
+    $ids = @($matches | Select-Object -ExpandProperty ProcessId -Unique)
+    Write-WarnLog "Codex CLI is currently running; closing process(es) before update: $($ids -join ', ')"
+    foreach ($processId in $ids) {
+        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+    }
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline -and (Test-CodexCliRunning)) {
+        Start-Sleep -Milliseconds 500
+    }
+    if (Test-CodexCliRunning) {
+        Write-WarnLog 'Codex CLI is still running after the close request; npm may still hit a Windows file lock.'
+    } else {
+        Start-Sleep -Seconds 1
+        Write-Log 'Codex CLI closed before update.'
+    }
+}
+
+function Remove-CodexNpmTempDirs {
+    param([Parameter(Mandatory = $true)][string]$NpmPath)
+
+    if (-not (Test-Path -LiteralPath $NpmPath)) {
+        return
+    }
+
+    try {
+        $npmBin = & $NpmPath prefix -g 2>$null
+        if (-not $npmBin) {
+            return
+        }
+        $npmBin = $npmBin.Trim()
+        $openAiRoot = Join-Path (Join-Path $npmBin 'node_modules') '@openai'
+        if (-not (Test-Path -LiteralPath $openAiRoot)) {
+            return
+        }
+        $rootFull = [System.IO.Path]::GetFullPath($openAiRoot).TrimEnd('\') + '\'
+        Get-ChildItem -LiteralPath $openAiRoot -Force -Directory -Filter '.codex-*' -ErrorAction SilentlyContinue | ForEach-Object {
+            $targetFull = [System.IO.Path]::GetFullPath($_.FullName)
+            $isSafeTarget = $targetFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase) -and $_.Name.StartsWith('.codex-', [System.StringComparison]::OrdinalIgnoreCase)
+            if ($isSafeTarget) {
+                Remove-Item -LiteralPath $targetFull -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {
+        Write-WarnLog "Codex npm temp cleanup skipped: $($_.Exception.Message)"
+    }
+}
+
 function Install-NpmCliTarget {
     param(
         [Parameter(Mandatory = $true)][string]$Key,
@@ -365,14 +431,28 @@ function Install-NpmCliTarget {
     $env:npm_config_update_notifier = 'false'
     foreach ($pkg in $spec.Packages) {
         $isClaudePackage = $pkg -eq '@anthropic-ai/claude-code'
+        $isCodexPackage = $pkg -eq '@openai/codex'
         if ($isClaudePackage) {
             [void](Repair-ClaudeAfterFailedUpdate -NpmPath $NpmPath)
+        }
+        if ($isCodexPackage) {
+            Remove-CodexNpmTempDirs -NpmPath $NpmPath
+            if (Test-CodexCliRunning) {
+                Stop-CodexCliForUpdate
+                if (Test-CodexCliRunning) {
+                    Write-WarnLog 'Codex CLI could not be closed; aborting npm install/update to avoid locking codex.exe.'
+                    continue
+                }
+            }
         }
         Write-Log "Trying npm package for $($spec.Label): $pkg"
         $code = Invoke-ExternalCommand -Args (@($NpmPath) + $NpmFlags + @('install', '-g', $pkg))
         $claudeHealthy = $false
         if ($isClaudePackage) {
             $claudeHealthy = Repair-ClaudeAfterFailedUpdate -NpmPath $NpmPath
+        }
+        if ($isCodexPackage) {
+            Remove-CodexNpmTempDirs -NpmPath $NpmPath
         }
         if ($code -eq 0) {
             if ($isClaudePackage -and -not $claudeHealthy) {
@@ -381,6 +461,9 @@ function Install-NpmCliTarget {
             }
             Write-Log "Installed $($spec.Label) using package $pkg"
             return
+        }
+        if ($isCodexPackage -and (Test-CodexCliRunning)) {
+            Write-WarnLog 'Codex npm install/update failed and Codex still appears to be running.'
         }
         if ($isClaudePackage -and $claudeHealthy) {
             Write-WarnLog 'Claude npm install/update failed, but an existing claude.exe was restored. Continuing with the recovered installation.'
@@ -440,15 +523,28 @@ function Remove-CodexNpmTempDirs {
   } catch { }
 }
 
-function Test-CodexCliRunning {
+function Get-CodexCliProcesses {
   try {
-    $matches = Get-CimInstance Win32_Process -Filter "name = 'codex.exe' or name = 'node.exe'" -ErrorAction SilentlyContinue | Where-Object {
+    return @(Get-CimInstance Win32_Process -Filter "name = 'codex.exe' or name = 'node.exe'" -ErrorAction SilentlyContinue | Where-Object {
       $_.Name -ieq 'codex.exe' -or ([string]$_.CommandLine) -match '\\@openai\\codex\\bin\\codex\.js'
-    } | Select-Object -First 1
-    return $null -ne $matches
+    })
   } catch {
-    return $false
+    return @()
   }
+}
+
+function Test-CodexCliRunning {
+  return @(Get-CodexCliProcesses).Count -gt 0
+}
+
+function Stop-CodexCliForUpdate {
+  $matches = @(Get-CodexCliProcesses)
+  if ($matches.Count -eq 0) { return }
+  $ids = @($matches | Select-Object -ExpandProperty ProcessId -Unique)
+  foreach ($processId in $ids) { Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue }
+  $deadline = (Get-Date).AddSeconds(30)
+  while ((Get-Date) -lt $deadline -and (Test-CodexCliRunning)) { Start-Sleep -Milliseconds 500 }
+  if (-not (Test-CodexCliRunning)) { Start-Sleep -Seconds 1 }
 }
 
 function Test-ClaudeCliRunning {
@@ -528,6 +624,7 @@ function Update-NpmCli([string[]]$Candidates) {
     if ($LASTEXITCODE -ne 0) { continue }
     if ($pkg -eq '@openai/codex') {
       Remove-CodexNpmTempDirs
+      Stop-CodexCliForUpdate
       if (Test-CodexCliRunning) { return }
     }
     if ($pkg -eq '@anthropic-ai/claude-code') {
@@ -654,7 +751,7 @@ Usage:
 
 Commands:
   install-all              Install all supported CLIs (default)
-  install <target>         Install one target (claude/codex/gemini/grok/qwen/copilot/mistral/ollama/all)
+  install <target>         Install one target (claude/codex/gemini/grok/qwen/copilot/openclaw/ironclaw/mistral/ollama/all)
   setup-updater            Configure hidden auto-update Scheduled Task only
   list                     List supported targets
   help                     Show help (or use: Get-Help .\install_all_windows.ps1 -Detailed)
