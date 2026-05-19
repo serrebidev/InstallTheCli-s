@@ -60,6 +60,55 @@ PIP_QUIET_FLAGS = ["--disable-pip-version-check", "--no-input", "--quiet"]
 MACOS_BREW_FORMULA_CLIS = ("gemini-cli", "qwen-code", "mistral-vibe", "ollama", "ironclaw")
 MACOS_BREW_CASK_CLIS = ("claude-code", "codex", "copilot-cli")
 MACOS_NPM_UPDATE_PACKAGES = (GROK_NPM_PACKAGE, OPENCLAW_NPM_PACKAGE)
+RTK_GEMINI_MD = """# RTK - Rust Token Killer (Gemini CLI)
+
+**Usage**: Token-optimized CLI proxy for shell commands.
+
+## Rule
+
+Always prefix shell commands with `rtk`.
+
+Examples:
+
+```bash
+rtk git status
+rtk cargo test
+rtk npm run build
+rtk pytest -q
+```
+
+## Hook-Based Usage
+
+Shell commands are automatically rewritten by the Gemini CLI `BeforeTool` hook.
+Example: `git status` -> `rtk git status` (transparent, 0 tokens overhead)
+
+## Meta Commands
+
+```bash
+rtk gain            # Token savings analytics
+rtk gain --history  # Recent command savings history
+rtk proxy <cmd>     # Run raw command without filtering
+```
+
+## Verification
+
+```bash
+rtk --version
+rtk gain
+which rtk
+```
+"""
+
+RTK_OPTIONAL_INTEGRATIONS = (
+    ("GitHub Copilot CLI", ("copilot", "github-copilot-cli", "github-copilot"), ("--copilot",)),
+    ("OpenCode", ("opencode",), ("--opencode",)),
+    ("Cursor Agent", ("cursor",), ("--agent", "cursor")),
+    ("Windsurf", ("windsurf",), ("--agent", "windsurf")),
+    ("Cline / Roo Code", ("cline",), ("--agent", "cline")),
+    ("Kilo Code", ("kilocode",), ("--agent", "kilocode")),
+    ("Google Antigravity", ("antigravity",), ("--agent", "antigravity")),
+    ("Hermes CLI", ("hermes",), ("--agent", "hermes")),
+)
 
 
 @dataclass(frozen=True)
@@ -775,6 +824,64 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "    }",
         "  } catch { }",
         "}",
+        "function Write-Utf8NoBom([string]$Path, [string]$Content) {",
+        "  $dir = Split-Path -Parent $Path",
+        "  if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }",
+        "  $encoding = New-Object System.Text.UTF8Encoding($false)",
+        "  [System.IO.File]::WriteAllText($Path, $Content, $encoding)",
+        "}",
+        "function Ensure-MarkdownImport([string]$Path, [string]$ImportLine) {",
+        "  if (-not (Test-Path -LiteralPath $Path)) { Write-Utf8NoBom $Path \"$ImportLine`n\"; return }",
+        "  $content = Get-Content -LiteralPath $Path -Raw",
+        "  if ($content -notmatch \"(?m)^$([regex]::Escape($ImportLine))\\s*$\") { Write-Utf8NoBom $Path \"$ImportLine`n`n$content\" }",
+        "}",
+        "function Ensure-GeminiRtkConfig([string]$RtkExe) {",
+        "  if (-not (Get-Command gemini -ErrorAction SilentlyContinue)) { return }",
+        "  $geminiDir = Join-Path $env:USERPROFILE '.gemini'",
+        "  if (-not (Test-Path -LiteralPath $geminiDir)) { New-Item -ItemType Directory -Force -Path $geminiDir | Out-Null }",
+        "  $rtkMd = @'",
+        "# RTK - Rust Token Killer (Gemini CLI)",
+        "",
+        "**Usage**: Token-optimized CLI proxy for shell commands.",
+        "",
+        "## Rule",
+        "",
+        "Always prefix shell commands with `rtk`.",
+        "",
+        "## Hook-Based Usage",
+        "",
+        "Shell commands are automatically rewritten by the Gemini CLI `BeforeTool` hook.",
+        "Example: `git status` -> `rtk git status` (transparent, 0 tokens overhead)",
+        "'@",
+        "  Write-Utf8NoBom (Join-Path $geminiDir 'RTK.md') ($rtkMd + \"`n\")",
+        "  Ensure-MarkdownImport (Join-Path $geminiDir 'GEMINI.md') '@RTK.md'",
+        "  $settingsPath = Join-Path $geminiDir 'settings.json'",
+        "  try {",
+        "    $s = if (Test-Path -LiteralPath $settingsPath) { Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }",
+        "    if (-not $s.PSObject.Properties['hooks']) { $s | Add-Member -MemberType NoteProperty -Name hooks -Value ([pscustomobject]@{}) }",
+        "    if (-not $s.hooks.PSObject.Properties['BeforeTool']) { $s.hooks | Add-Member -MemberType NoteProperty -Name BeforeTool -Value @() }",
+        "    $kept = @()",
+        "    foreach ($entry in @($s.hooks.BeforeTool)) {",
+        "      $hasRtkGemini = $false",
+        "      foreach ($h in @($entry.hooks)) {",
+        "        if ($h.type -eq 'command' -and (($h.command -as [string]) -match 'rtk(\\.exe)?\\s+hook\\s+gemini')) { $hasRtkGemini = $true }",
+        "      }",
+        "      if ($entry.matcher -eq 'run_shell_command' -and $hasRtkGemini) { continue }",
+        "      $kept += $entry",
+        "    }",
+        "    $kept += [pscustomobject]@{ matcher = 'run_shell_command'; hooks = @([pscustomobject]@{ name = 'rtk-gemini-shell-prefix'; type = 'command'; command = \"$RtkExe hook gemini\" }) }",
+        "    $s.hooks.BeforeTool = @($kept)",
+        "    Write-Utf8NoBom $settingsPath (($s | ConvertTo-Json -Depth 20) + \"`n\")",
+        "  } catch { }",
+        "}",
+        "function Test-AnyCmd([string[]]$CommandNames) {",
+        "  foreach ($name in $CommandNames) { if (Get-Command $name -ErrorAction SilentlyContinue) { return $true } }",
+        "  return $false",
+        "}",
+        "function Invoke-RtkInitIfCommand {",
+        "  param([string]$RtkExe, [string[]]$CommandNames, [string[]]$InitArgs)",
+        "  if (Test-AnyCmd $CommandNames) { & $RtkExe init -g @InitArgs *>&1 | Out-Null }",
+        "}",
         # Rebuild rtk from latest git master if it's already installed. Bust
         # the cargo git checkout cache for the rtk repo first; without this,
         # `cargo install --git --force` silently reuses a stale checkout and
@@ -788,18 +895,27 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "  $cargoExe = Join-Path $cargoBin 'cargo.exe'",
         "  $rtkExe = Join-Path $cargoBin 'rtk.exe'",
         "  if (-not (Test-Path -LiteralPath $cargoExe) -or -not (Test-Path -LiteralPath $rtkExe)) { return }",
-        "  foreach ($sub in @('checkouts','db')) {",
-        "    $root = Join-Path $env:USERPROFILE \".cargo\\git\\$sub\"",
-        "    if (Test-Path -LiteralPath $root) {",
-        "      Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |",
-        "        Where-Object { $_.Name -like 'rtk-*' } |",
-        "        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }",
+        "  $activeRtk = @(Get-Process -Name 'rtk' -ErrorAction SilentlyContinue)",
+        "  if ($activeRtk.Count -eq 0) {",
+        "    foreach ($sub in @('checkouts','db')) {",
+        "      $root = Join-Path $env:USERPROFILE \".cargo\\git\\$sub\"",
+        "      if (Test-Path -LiteralPath $root) {",
+        "        Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |",
+        "          Where-Object { $_.Name -like 'rtk-*' } |",
+        "          ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }",
+        "      }",
         "    }",
+        "    & $cargoExe install --git https://github.com/rtk-ai/rtk --branch master --force *>&1 | Out-Null",
+        "    if ($LASTEXITCODE -ne 0) { return }",
         "  }",
-        "  & $cargoExe install --git https://github.com/rtk-ai/rtk --branch master --force *>&1 | Out-Null",
-        "  if ($LASTEXITCODE -ne 0) { return }",
         "  if (Get-Command claude -ErrorAction SilentlyContinue) { & $rtkExe init -g --auto-patch *>&1 | Out-Null }",
         "  if (Get-Command codex -ErrorAction SilentlyContinue) { & $rtkExe init -g --codex *>&1 | Out-Null }",
+        "  Invoke-RtkInitIfCommand -RtkExe $rtkExe -CommandNames @('copilot','github-copilot-cli','github-copilot') -InitArgs @('--copilot')",
+        "  Invoke-RtkInitIfCommand -RtkExe $rtkExe -CommandNames @('opencode') -InitArgs @('--opencode')",
+        "  foreach ($agent in @('cursor','windsurf','cline','kilocode','antigravity','hermes')) {",
+        "    Invoke-RtkInitIfCommand -RtkExe $rtkExe -CommandNames @($agent) -InitArgs @('--agent',$agent)",
+        "  }",
+        "  Ensure-GeminiRtkConfig $rtkExe",
         "  $settingsPath = Join-Path $env:USERPROFILE '.claude\\settings.json'",
         "  if (Test-Path -LiteralPath $settingsPath) {",
         "    try {",
@@ -1139,12 +1255,30 @@ fi
 
 {npm_lines}
 
+rtk_has_any_command() {{
+  local name
+  for name in "$@"; do
+    command_exists "$name" && return 0
+  done
+  return 1
+}}
+
+configure_rtk_supported_agents() {{
+  local rtk_exe="$1"
+  rtk_has_any_command copilot github-copilot-cli github-copilot && "$rtk_exe" init -g --copilot >/dev/null 2>&1 || true
+  command_exists opencode && "$rtk_exe" init -g --opencode >/dev/null 2>&1 || true
+  local agent
+  for agent in cursor windsurf cline kilocode antigravity hermes; do
+    command_exists "$agent" && "$rtk_exe" init -g --agent "$agent" >/dev/null 2>&1 || true
+  done
+}}
+
 # Rebuild rtk from latest git master if it's already installed. Mirror of the
 # install path: bust the cargo git checkout cache for the rtk repo (without
 # this, `cargo install --git --force` reuses a stale checkout and rebuilds
 # the same old SHA when only the master ref has moved), then rebuild from
-# --branch master. Re-run rtk init for Claude/Codex so any newly-added hook
-# capabilities land.
+# --branch master. Re-run rtk setup for compatible installed AI CLIs so any
+# newly-added hook capabilities land.
 update_rtk() {{
   local cargo_exe="${{HOME}}/.cargo/bin/cargo"
   local rtk_exe="${{HOME}}/.cargo/bin/rtk"
@@ -1155,6 +1289,8 @@ update_rtk() {{
   "$cargo_exe" install --git https://github.com/rtk-ai/rtk --branch master --force >/dev/null 2>&1 || return 0
   command_exists claude && "$rtk_exe" init -g --auto-patch >/dev/null 2>&1 || true
   command_exists codex && "$rtk_exe" init -g --codex >/dev/null 2>&1 || true
+  configure_rtk_supported_agents "$rtk_exe"
+  command_exists gemini && "$rtk_exe" init -g --gemini >/dev/null 2>&1 || true
 }}
 update_rtk
 """
@@ -2546,6 +2682,112 @@ def _clear_cargo_git_cache_for(repo_prefix: str, log: Callable[[str], None]) -> 
                 log(f"Warning: could not remove {target}: {exc}")
 
 
+def _write_text_if_changed(path: str, content: str) -> bool:
+    existing: Optional[str]
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            existing = fh.read()
+    except FileNotFoundError:
+        existing = None
+    if existing == content:
+        return False
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(content)
+    return True
+
+
+def _ensure_markdown_import(path: str, import_line: str) -> bool:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            content = fh.read()
+    except FileNotFoundError:
+        _write_text_if_changed(path, import_line + "\n")
+        return True
+    if any(line.strip() == import_line for line in content.splitlines()):
+        return False
+    return _write_text_if_changed(path, import_line + "\n\n" + content)
+
+
+def _ensure_gemini_rtk_config(rtk_exe: str, log: Callable[[str], None]) -> None:
+    if not shutil.which("gemini"):
+        return
+    gemini_dir = os.path.join(os.path.expanduser("~"), ".gemini")
+    rtk_md_path = os.path.join(gemini_dir, "RTK.md")
+    gemini_md_path = os.path.join(gemini_dir, "GEMINI.md")
+    settings_path = os.path.join(gemini_dir, "settings.json")
+
+    try:
+        if _write_text_if_changed(rtk_md_path, RTK_GEMINI_MD):
+            log(f"Updated Gemini RTK instructions at {rtk_md_path}")
+        if _ensure_markdown_import(gemini_md_path, "@RTK.md"):
+            log(f"Ensured Gemini imports RTK.md at {gemini_md_path}")
+
+        try:
+            with open(settings_path, "r", encoding="utf-8") as fh:
+                settings = json.load(fh)
+        except FileNotFoundError:
+            settings = {}
+        except ValueError as exc:
+            log(f"Warning: could not parse {settings_path}: {exc}")
+            return
+
+        hooks = settings.setdefault("hooks", {})
+        before_tool = hooks.setdefault("BeforeTool", [])
+        rtk_pattern = re.compile(r"rtk(\.exe)?\s+hook\s+gemini")
+        kept: list[dict] = []
+        for entry in before_tool:
+            entry_hooks = entry.get("hooks", []) if isinstance(entry, dict) else []
+            has_rtk_gemini = any(
+                h.get("type") == "command" and rtk_pattern.search(str(h.get("command", "")))
+                for h in entry_hooks
+                if isinstance(h, dict)
+            )
+            if isinstance(entry, dict) and entry.get("matcher") == "run_shell_command" and has_rtk_gemini:
+                continue
+            kept.append(entry)
+        kept.append(
+            {
+                "matcher": "run_shell_command",
+                "hooks": [
+                    {
+                        "name": "rtk-gemini-shell-prefix",
+                        "type": "command",
+                        "command": f"{rtk_exe} hook gemini",
+                    }
+                ],
+            }
+        )
+        hooks["BeforeTool"] = kept
+        os.makedirs(gemini_dir, exist_ok=True)
+        with open(settings_path, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(settings, fh, indent=2)
+            fh.write("\n")
+        log("Registered rtk hook for Gemini CLI")
+    except OSError as exc:
+        log(f"Warning: could not configure Gemini RTK hook: {exc}")
+
+
+def _has_any_command(command_names: tuple[str, ...]) -> bool:
+    return any(shutil.which(command_name) for command_name in command_names)
+
+
+def _configure_rtk_for_installed_ais(rtk_exe: str, log: Callable[[str], None]) -> None:
+    if shutil.which("claude"):
+        log("Registering rtk hook for Claude Code")
+        run_command([rtk_exe, "init", "-g", "--auto-patch"], log)
+        if is_windows():
+            _normalize_claude_rtk_hook(log)
+    if shutil.which("codex"):
+        log("Registering rtk for Codex CLI")
+        run_command([rtk_exe, "init", "-g", "--codex"], log)
+    for label, command_names, init_args in RTK_OPTIONAL_INTEGRATIONS:
+        if _has_any_command(command_names):
+            log(f"Registering rtk for {label}")
+            run_command([rtk_exe, "init", "-g", *init_args], log)
+    _ensure_gemini_rtk_config(rtk_exe, log)
+
+
 def try_install_rtk(
     spec: CliSpec,
     log: Callable[[str], None],
@@ -2585,14 +2827,7 @@ def try_install_rtk(
         log(err)
         return (False, err)
 
-    if shutil.which("claude"):
-        log("Registering rtk hook for Claude Code")
-        run_command([rtk_exe, "init", "-g", "--auto-patch"], log)
-        if is_windows():
-            _normalize_claude_rtk_hook(log)
-    if shutil.which("codex"):
-        log("Registering rtk for Codex CLI")
-        run_command([rtk_exe, "init", "-g", "--codex"], log)
+    _configure_rtk_for_installed_ais(rtk_exe, log)
 
     # Linux: surface rtk on PATH for any login shell. /root/.local/bin (or
     # ~/.local/bin) is on PATH via ~/.profile on Debian-family accounts but

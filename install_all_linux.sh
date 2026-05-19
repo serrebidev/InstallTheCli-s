@@ -397,6 +397,153 @@ ensure_rust_toolchain() {
   fi
 }
 
+configure_rtk_gemini() {
+  local rtk_bin="$1"
+  command_exists gemini || return 0
+  local gemini_dir="${HOME:-/root}/.gemini"
+  mkdir -p "$gemini_dir"
+  cat > "${gemini_dir}/RTK.md" <<'EOF'
+# RTK - Rust Token Killer (Gemini CLI)
+
+**Usage**: Token-optimized CLI proxy for shell commands.
+
+## Rule
+
+Always prefix shell commands with `rtk`.
+
+Examples:
+
+```bash
+rtk git status
+rtk cargo test
+rtk npm run build
+rtk pytest -q
+```
+
+## Hook-Based Usage
+
+Shell commands are automatically rewritten by the Gemini CLI `BeforeTool` hook.
+Example: `git status` -> `rtk git status` (transparent, 0 tokens overhead)
+
+## Meta Commands
+
+```bash
+rtk gain            # Token savings analytics
+rtk gain --history  # Recent command savings history
+rtk proxy <cmd>     # Run raw command without filtering
+```
+
+## Verification
+
+```bash
+rtk --version
+rtk gain
+which rtk
+```
+EOF
+
+  if [[ ! -f "${gemini_dir}/GEMINI.md" ]]; then
+    printf '%s\n' '@RTK.md' > "${gemini_dir}/GEMINI.md"
+  elif ! grep -Fxq '@RTK.md' "${gemini_dir}/GEMINI.md"; then
+    local tmp
+    tmp="$(mktemp)"
+    printf '%s\n\n' '@RTK.md' > "$tmp"
+    cat "${gemini_dir}/GEMINI.md" >> "$tmp"
+    mv "$tmp" "${gemini_dir}/GEMINI.md"
+  fi
+
+  if command_exists python3; then
+    python3 - "${gemini_dir}/settings.json" "$rtk_bin" <<'PY'
+import json
+import os
+import re
+import sys
+
+settings_path, rtk_bin = sys.argv[1:3]
+try:
+    with open(settings_path, "r", encoding="utf-8") as fh:
+        settings = json.load(fh)
+except FileNotFoundError:
+    settings = {}
+except json.JSONDecodeError:
+    raise SystemExit(0)
+
+hooks = settings.setdefault("hooks", {})
+before_tool = hooks.setdefault("BeforeTool", [])
+pattern = re.compile(r"rtk(\.exe)?\s+hook\s+gemini")
+kept = []
+for entry in before_tool:
+    entry_hooks = entry.get("hooks", []) if isinstance(entry, dict) else []
+    has_rtk = any(
+        isinstance(h, dict)
+        and h.get("type") == "command"
+        and pattern.search(str(h.get("command", "")))
+        for h in entry_hooks
+    )
+    if isinstance(entry, dict) and entry.get("matcher") == "run_shell_command" and has_rtk:
+        continue
+    kept.append(entry)
+kept.append({
+    "matcher": "run_shell_command",
+    "hooks": [{
+        "name": "rtk-gemini-shell-prefix",
+        "type": "command",
+        "command": f"{rtk_bin} hook gemini",
+    }],
+})
+hooks["BeforeTool"] = kept
+os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+with open(settings_path, "w", encoding="utf-8", newline="\n") as fh:
+    json.dump(settings, fh, indent=2)
+    fh.write("\n")
+PY
+  else
+    "$rtk_bin" init -g --gemini || warn "rtk init (Gemini) failed"
+  fi
+  log "Registered rtk hook for Gemini CLI"
+}
+
+rtk_has_any_command() {
+  local name
+  for name in "$@"; do
+    command_exists "$name" && return 0
+  done
+  return 1
+}
+
+configure_rtk_supported_agents() {
+  local rtk_bin="$1"
+  if rtk_has_any_command copilot github-copilot-cli github-copilot; then
+    log "Registering rtk for GitHub Copilot CLI"
+    "$rtk_bin" init -g --copilot || warn "rtk init (Copilot) failed"
+  fi
+  if command_exists opencode; then
+    log "Registering rtk for OpenCode"
+    "$rtk_bin" init -g --opencode || warn "rtk init (OpenCode) failed"
+  fi
+  local agent
+  for agent in cursor windsurf cline kilocode antigravity hermes; do
+    if command_exists "$agent"; then
+      log "Registering rtk for ${agent}"
+      "$rtk_bin" init -g --agent "$agent" || warn "rtk init (${agent}) failed"
+    fi
+  done
+}
+
+configure_rtk_integrations() {
+  local rtk_bin="$1"
+  if command_exists claude; then
+    log "Registering rtk hook for Claude Code"
+    "$rtk_bin" init -g --auto-patch || warn "rtk init (Claude) failed"
+  fi
+  if command_exists codex; then
+    log "Registering rtk for Codex CLI"
+    "$rtk_bin" init -g --codex || warn "rtk init (Codex) failed"
+  fi
+  configure_rtk_supported_agents "$rtk_bin"
+  configure_rtk_gemini "$rtk_bin"
+}
+
 # Install rtk-ai/rtk from git master via `cargo install`. The cargo git
 # checkout cache is cleared first so we always pick up new commits on master;
 # without this, cargo silently rebuilds the same old SHA when only the
@@ -426,17 +573,9 @@ install_rtk() {
     log "Linked /root/.local/bin/rtk -> $rtk_bin"
   fi
 
-  # Wire rtk into Claude Code and Codex if those CLIs are installed. These
-  # init commands are idempotent.
+  # Wire rtk into compatible AI CLIs if those CLIs are installed.
   if (( ! DRY_RUN )) && [[ -x "$rtk_bin" ]]; then
-    if command_exists claude; then
-      log "Registering rtk hook for Claude Code"
-      "$rtk_bin" init -g --auto-patch || warn "rtk init (Claude) failed"
-    fi
-    if command_exists codex; then
-      log "Registering rtk for Codex CLI"
-      "$rtk_bin" init -g --codex || warn "rtk init (Codex) failed"
-    fi
+    configure_rtk_integrations "$rtk_bin"
     log "Installed rtk: $("$rtk_bin" --version 2>&1)"
   fi
 }
@@ -585,6 +724,119 @@ update_ollama() {
   run_shell "curl -fsSL ${OLLAMA_INSTALL_URL} | sh" || true
 }
 
+configure_rtk_gemini() {
+  local rtk_bin="$1"
+  command_exists gemini || return 0
+  local gemini_dir="${HOME:-/root}/.gemini"
+  mkdir -p "$gemini_dir"
+  cat > "${gemini_dir}/RTK.md" <<'RTKMD'
+# RTK - Rust Token Killer (Gemini CLI)
+
+**Usage**: Token-optimized CLI proxy for shell commands.
+
+## Rule
+
+Always prefix shell commands with `rtk`.
+
+Examples:
+
+```bash
+rtk git status
+rtk cargo test
+rtk npm run build
+rtk pytest -q
+```
+
+## Hook-Based Usage
+
+Shell commands are automatically rewritten by the Gemini CLI `BeforeTool` hook.
+Example: `git status` -> `rtk git status` (transparent, 0 tokens overhead)
+
+## Meta Commands
+
+```bash
+rtk gain            # Token savings analytics
+rtk gain --history  # Recent command savings history
+rtk proxy <cmd>     # Run raw command without filtering
+```
+
+## Verification
+
+```bash
+rtk --version
+rtk gain
+which rtk
+```
+RTKMD
+  if [[ ! -f "${gemini_dir}/GEMINI.md" ]]; then
+    printf '%s\n' '@RTK.md' > "${gemini_dir}/GEMINI.md"
+  elif ! grep -Fxq '@RTK.md' "${gemini_dir}/GEMINI.md"; then
+    local tmp
+    tmp="$(mktemp)"
+    printf '%s\n\n' '@RTK.md' > "$tmp"
+    cat "${gemini_dir}/GEMINI.md" >> "$tmp"
+    mv "$tmp" "${gemini_dir}/GEMINI.md"
+  fi
+  if command_exists python3; then
+    python3 - "${gemini_dir}/settings.json" "$rtk_bin" <<'PY'
+import json, os, re, sys
+settings_path, rtk_bin = sys.argv[1:3]
+try:
+    with open(settings_path, "r", encoding="utf-8") as fh:
+        settings = json.load(fh)
+except FileNotFoundError:
+    settings = {}
+except json.JSONDecodeError:
+    raise SystemExit(0)
+hooks = settings.setdefault("hooks", {})
+before_tool = hooks.setdefault("BeforeTool", [])
+pattern = re.compile(r"rtk(\.exe)?\s+hook\s+gemini")
+kept = []
+for entry in before_tool:
+    entry_hooks = entry.get("hooks", []) if isinstance(entry, dict) else []
+    has_rtk = any(isinstance(h, dict) and h.get("type") == "command" and pattern.search(str(h.get("command", ""))) for h in entry_hooks)
+    if isinstance(entry, dict) and entry.get("matcher") == "run_shell_command" and has_rtk:
+        continue
+    kept.append(entry)
+kept.append({"matcher": "run_shell_command", "hooks": [{"name": "rtk-gemini-shell-prefix", "type": "command", "command": f"{rtk_bin} hook gemini"}]})
+hooks["BeforeTool"] = kept
+os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+with open(settings_path, "w", encoding="utf-8", newline="\n") as fh:
+    json.dump(settings, fh, indent=2)
+    fh.write("\n")
+PY
+  else
+    "$rtk_bin" init -g --gemini >/dev/null 2>&1 || true
+  fi
+  log "Registered rtk hook for Gemini CLI"
+}
+
+rtk_has_any_command() {
+  local name
+  for name in "$@"; do
+    command_exists "$name" && return 0
+  done
+  return 1
+}
+
+configure_rtk_supported_agents() {
+  local rtk_bin="$1"
+  rtk_has_any_command copilot github-copilot-cli github-copilot && "$rtk_bin" init -g --copilot >/dev/null 2>&1 || true
+  command_exists opencode && "$rtk_bin" init -g --opencode >/dev/null 2>&1 || true
+  local agent
+  for agent in cursor windsurf cline kilocode antigravity hermes; do
+    command_exists "$agent" && "$rtk_bin" init -g --agent "$agent" >/dev/null 2>&1 || true
+  done
+}
+
+configure_rtk_integrations() {
+  local rtk_bin="$1"
+  command_exists claude && "$rtk_bin" init -g --auto-patch >/dev/null 2>&1 || true
+  command_exists codex && "$rtk_bin" init -g --codex >/dev/null 2>&1 || true
+  configure_rtk_supported_agents "$rtk_bin"
+  configure_rtk_gemini "$rtk_bin"
+}
+
 # Rebuild rtk from latest git master if it's already installed. Mirrors the
 # install path: bust the cargo git checkout cache for the rtk repo so cargo
 # actually picks up new commits (the --force flag alone doesn't refetch a
@@ -606,8 +858,7 @@ update_rtk() {
     return 0
   fi
   ln -sfn "$rtk_bin" /root/.local/bin/rtk 2>/dev/null || true
-  command_exists claude && "$rtk_bin" init -g --auto-patch >/dev/null 2>&1 || true
-  command_exists codex && "$rtk_bin" init -g --codex >/dev/null 2>&1 || true
+  configure_rtk_integrations "$rtk_bin"
   log "Updated rtk to $("$rtk_bin" --version 2>&1)"
 }
 

@@ -1,8 +1,10 @@
+import json
 import os
 import subprocess
 import tempfile
 import types
 import unittest
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import ai_cli_installer_gui as m
@@ -546,12 +548,15 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("brew_install_formula ollama", script)
         self.assertIn("install_npm_cli \"Grok CLI (Vibe Kit)\" 20", script)
         self.assertIn("install_openclaw_official", script)
+        self.assertIn("brew_install_formula ironclaw", script)
         self.assertIn("node_satisfies()", script)
         self.assertIn("ensure_node 22 14", script)
         self.assertIn("setup-launch-agent", script)
         self.assertIn("launchctl bootstrap", script)
         self.assertIn("update_brew_package cask codex", script)
         self.assertIn("update_npm_package \"@vibe-kit/grok-cli\"", script)
+        self.assertIn("update_npm_package \"openclaw\"", script)
+        self.assertIn("update_brew_package formula ironclaw", script)
         self.assertIn("lower()", script)
         self.assertNotIn("${answer,,}", script)
         self.assertNotIn("${positional[0],,}", script)
@@ -4009,6 +4014,61 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn("master", run_args)
         self.assertIn("--force", run_args)
 
+    def test_rtk_install_configures_gemini_without_overwriting_memory(self) -> None:
+        spec = next(s for s in m.CLI_SPECS if s.key == "rtk")
+        with tempfile.TemporaryDirectory() as tmp:
+            gemini_dir = os.path.join(tmp, ".gemini")
+            os.makedirs(gemini_dir)
+            gemini_md = os.path.join(gemini_dir, "GEMINI.md")
+            with open(gemini_md, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("## Existing Gemini Memory\n- keep me\n")
+
+            def fake_which(name: str) -> Optional[str]:
+                return name if name == "gemini" else None
+
+            with (
+                patch.object(m, "ensure_rust_toolchain", return_value=os.path.join(tmp, ".cargo", "bin", "cargo")),
+                patch.object(m, "_clear_cargo_git_cache_for"),
+                patch.object(m, "run_command", return_value=0),
+                patch.object(m.os.path, "isfile", return_value=True),
+                patch.object(m.os.path, "expanduser", return_value=tmp),
+                patch.object(m.shutil, "which", side_effect=fake_which),
+                patch.object(m, "is_windows", return_value=False),
+                patch.object(m, "is_linux", return_value=False),
+            ):
+                ok, pkg = m.try_install_rtk(spec, lambda _msg: None)
+
+            self.assertTrue(ok)
+            self.assertEqual(pkg, "rtk")
+            with open(gemini_md, "r", encoding="utf-8") as fh:
+                gemini_content = fh.read()
+            self.assertTrue(gemini_content.startswith("@RTK.md\n\n"))
+            self.assertIn("## Existing Gemini Memory", gemini_content)
+            with open(os.path.join(gemini_dir, "RTK.md"), "r", encoding="utf-8") as fh:
+                self.assertIn("Rust Token Killer (Gemini CLI)", fh.read())
+            with open(os.path.join(gemini_dir, "settings.json"), "r", encoding="utf-8") as fh:
+                settings = json.load(fh)
+            hook = settings["hooks"]["BeforeTool"][0]["hooks"][0]
+            self.assertEqual(hook["command"], os.path.join(tmp, ".cargo", "bin", "rtk") + " hook gemini")
+
+    def test_rtk_configures_detected_optional_integrations(self) -> None:
+        detected = {"copilot", "opencode", "cursor"}
+
+        def fake_which(name: str) -> Optional[str]:
+            return name if name in detected else None
+
+        with (
+            patch.object(m.shutil, "which", side_effect=fake_which),
+            patch.object(m, "run_command", return_value=0) as run_command,
+            patch.object(m, "is_windows", return_value=False),
+        ):
+            m._configure_rtk_for_installed_ais("/tmp/rtk", lambda _msg: None)
+
+        calls = [call.args[0] for call in run_command.call_args_list]
+        self.assertIn(["/tmp/rtk", "init", "-g", "--copilot"], calls)
+        self.assertIn(["/tmp/rtk", "init", "-g", "--opencode"], calls)
+        self.assertIn(["/tmp/rtk", "init", "-g", "--agent", "cursor"], calls)
+
     def test_clear_cargo_git_cache_removes_only_matching_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(m.os.path, "expanduser", return_value=tmp):
@@ -4032,6 +4092,11 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn("--branch master --force", script)
         self.assertIn("rtk-ai/rtk", script)
         self.assertIn("update_rtk", script)
+        self.assertIn("configure_rtk_integrations", script)
+        self.assertIn("configure_rtk_supported_agents", script)
+        self.assertIn("Registered rtk hook for Gemini CLI", script)
+        self.assertIn("--copilot", script)
+        self.assertIn('--agent "$agent"', script)
         # rtk must be a listed target and a parser alias.
         self.assertIn("\n  rtk\n", script)
         self.assertIn("ollama|rtk|all", script)
@@ -4045,6 +4110,11 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn("--branch master --force", script)
         self.assertIn("rtk-ai/rtk", script)
         self.assertIn("update_rtk", script)
+        self.assertIn("configure_rtk_integrations", script)
+        self.assertIn("configure_rtk_supported_agents", script)
+        self.assertIn("Registered rtk hook for Gemini CLI", script)
+        self.assertIn("--copilot", script)
+        self.assertIn('--agent "$agent"', script)
         self.assertIn("ollama|rtk|all", script)
 
     def test_windows_one_click_script_contains_rtk_target(self) -> None:
@@ -4057,6 +4127,10 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn("--branch', 'master', '--force'", script)
         self.assertIn("rtk-ai/rtk", script)
         self.assertIn("Update-Rtk", script)
+        self.assertIn("Ensure-GeminiRtkConfig", script)
+        self.assertIn("hook gemini", script)
+        self.assertIn("--copilot", script)
+        self.assertIn("'--agent', $agent", script)
         # Hook command normalization for Git Bash.
         self.assertIn("/c/Users/", script)
         self.assertIn("/.cargo/bin/rtk.exe hook claude", script)
@@ -4071,6 +4145,11 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn("rtk-*", script)
         # Hook normalization in settings.json.
         self.assertIn(".claude\\settings.json", script)
+        self.assertIn("Ensure-GeminiRtkConfig", script)
+        self.assertIn("hook gemini", script)
+        self.assertIn("--copilot", script)
+        self.assertIn("'--agent',$agent", script)
+        self.assertIn("Get-Process -Name 'rtk'", script)
 
     def test_macos_gui_auto_update_script_rebuilds_rtk(self) -> None:
         script = m.build_macos_cli_auto_update_script()
@@ -4078,6 +4157,9 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn("rtk-ai/rtk", script)
         self.assertIn("--branch master --force", script)
         self.assertIn("rtk-*", script)
+        self.assertIn("--gemini", script)
+        self.assertIn("--copilot", script)
+        self.assertIn('--agent "$agent"', script)
 
     def test_readme_lists_rtk_as_install_target(self) -> None:
         with open(os.path.join(os.getcwd(), "README.md"), "r", encoding="utf-8") as f:

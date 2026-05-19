@@ -350,15 +350,7 @@ function Install-Rtk {
 
     $rtkExe = Join-Path $cargoBin 'rtk.exe'
     if (-not $DryRun -and (Test-Path -LiteralPath $rtkExe)) {
-        if (Get-Command claude -ErrorAction SilentlyContinue) {
-            Write-Log 'Registering rtk hook for Claude Code'
-            [void](Invoke-ExternalCommand -Args @($rtkExe, 'init', '-g', '--auto-patch'))
-            Update-ClaudeRtkHookCommand
-        }
-        if (Get-Command codex -ErrorAction SilentlyContinue) {
-            Write-Log 'Registering rtk for Codex CLI'
-            [void](Invoke-ExternalCommand -Args @($rtkExe, 'init', '-g', '--codex'))
-        }
+        Configure-RtkIntegrations -RtkExe $rtkExe
         Write-Log "Installed rtk: $(& $rtkExe --version 2>&1)"
     }
 }
@@ -406,6 +398,162 @@ function Update-ClaudeRtkHookCommand {
     } catch {
         Write-WarnLog "Could not normalize Claude rtk hook: $($_.Exception.Message)"
     }
+}
+
+function Write-Utf8NoBom {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Content
+    )
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    }
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+}
+
+function Ensure-MarkdownImport {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ImportLine
+    )
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Utf8NoBom -Path $Path -Content "$ImportLine`n"
+        return
+    }
+    $content = Get-Content -LiteralPath $Path -Raw
+    if ($content -notmatch "(?m)^$([regex]::Escape($ImportLine))\s*$") {
+        Write-Utf8NoBom -Path $Path -Content "$ImportLine`n`n$content"
+    }
+}
+
+function Ensure-GeminiRtkConfig {
+    param([Parameter(Mandatory = $true)][string]$RtkExe)
+    if (-not (Get-Command gemini -ErrorAction SilentlyContinue)) { return }
+    $geminiDir = Join-Path $env:USERPROFILE '.gemini'
+    if (-not (Test-Path -LiteralPath $geminiDir)) {
+        New-Item -ItemType Directory -Force -Path $geminiDir | Out-Null
+    }
+    $rtkMd = @'
+# RTK - Rust Token Killer (Gemini CLI)
+
+**Usage**: Token-optimized CLI proxy for shell commands.
+
+## Rule
+
+Always prefix shell commands with `rtk`.
+
+Examples:
+
+```bash
+rtk git status
+rtk cargo test
+rtk npm run build
+rtk pytest -q
+```
+
+## Hook-Based Usage
+
+Shell commands are automatically rewritten by the Gemini CLI `BeforeTool` hook.
+Example: `git status` -> `rtk git status` (transparent, 0 tokens overhead)
+
+## Meta Commands
+
+```bash
+rtk gain            # Token savings analytics
+rtk gain --history  # Recent command savings history
+rtk proxy <cmd>     # Run raw command without filtering
+```
+
+## Verification
+
+```bash
+rtk --version
+rtk gain
+which rtk
+```
+'@
+    Write-Utf8NoBom -Path (Join-Path $geminiDir 'RTK.md') -Content ($rtkMd + "`n")
+    Ensure-MarkdownImport -Path (Join-Path $geminiDir 'GEMINI.md') -ImportLine '@RTK.md'
+    $settingsPath = Join-Path $geminiDir 'settings.json'
+    try {
+        $settings = if (Test-Path -LiteralPath $settingsPath) {
+            Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+        } else {
+            [pscustomobject]@{}
+        }
+        if (-not $settings.PSObject.Properties['hooks']) {
+            $settings | Add-Member -MemberType NoteProperty -Name hooks -Value ([pscustomobject]@{})
+        }
+        if (-not $settings.hooks.PSObject.Properties['BeforeTool']) {
+            $settings.hooks | Add-Member -MemberType NoteProperty -Name BeforeTool -Value @()
+        }
+        $kept = @()
+        foreach ($entry in @($settings.hooks.BeforeTool)) {
+            $hasRtkGemini = $false
+            foreach ($h in @($entry.hooks)) {
+                if ($h.type -eq 'command' -and (($h.command -as [string]) -match 'rtk(\.exe)?\s+hook\s+gemini')) {
+                    $hasRtkGemini = $true
+                }
+            }
+            if ($entry.matcher -eq 'run_shell_command' -and $hasRtkGemini) { continue }
+            $kept += $entry
+        }
+        $kept += [pscustomobject]@{
+            matcher = 'run_shell_command'
+            hooks = @([pscustomobject]@{
+                name = 'rtk-gemini-shell-prefix'
+                type = 'command'
+                command = "$RtkExe hook gemini"
+            })
+        }
+        $settings.hooks.BeforeTool = @($kept)
+        Write-Utf8NoBom -Path $settingsPath -Content (($settings | ConvertTo-Json -Depth 20) + "`n")
+        Write-Log 'Registered rtk hook for Gemini CLI'
+    } catch {
+        Write-WarnLog "Could not configure Gemini rtk hook: $($_.Exception.Message)"
+    }
+}
+
+function Test-AnyCommandAvailable {
+    param([Parameter(Mandatory = $true)][string[]]$CommandNames)
+    foreach ($name in $CommandNames) {
+        if (Get-Command $name -ErrorAction SilentlyContinue) { return $true }
+    }
+    return $false
+}
+
+function Invoke-RtkInitIfCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$RtkExe,
+        [Parameter(Mandatory = $true)][string[]]$CommandNames,
+        [Parameter(Mandatory = $true)][string[]]$InitArgs,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    if (-not (Test-AnyCommandAvailable -CommandNames $CommandNames)) { return }
+    Write-Log "Registering rtk for $Label"
+    $rtkArgs = @($RtkExe, 'init', '-g') + @($InitArgs)
+    [void](Invoke-ExternalCommand -Args $rtkArgs)
+}
+
+function Configure-RtkIntegrations {
+    param([Parameter(Mandatory = $true)][string]$RtkExe)
+    if (Get-Command claude -ErrorAction SilentlyContinue) {
+        Write-Log 'Registering rtk hook for Claude Code'
+        [void](Invoke-ExternalCommand -Args @($RtkExe, 'init', '-g', '--auto-patch'))
+        Update-ClaudeRtkHookCommand
+    }
+    if (Get-Command codex -ErrorAction SilentlyContinue) {
+        Write-Log 'Registering rtk for Codex CLI'
+        [void](Invoke-ExternalCommand -Args @($RtkExe, 'init', '-g', '--codex'))
+    }
+    Invoke-RtkInitIfCommand -RtkExe $RtkExe -CommandNames @('copilot','github-copilot-cli','github-copilot') -InitArgs @('--copilot') -Label 'GitHub Copilot CLI'
+    Invoke-RtkInitIfCommand -RtkExe $RtkExe -CommandNames @('opencode') -InitArgs @('--opencode') -Label 'OpenCode'
+    foreach ($agent in @('cursor','windsurf','cline','kilocode','antigravity','hermes')) {
+        Invoke-RtkInitIfCommand -RtkExe $RtkExe -CommandNames @($agent) -InitArgs @('--agent', $agent) -Label $agent
+    }
+    Ensure-GeminiRtkConfig -RtkExe $RtkExe
 }
 
 function Repair-ClaudeAfterFailedUpdate {
@@ -805,6 +953,99 @@ if (Test-Cmd "winget") {
   & winget upgrade --id Ollama.Ollama -e --accept-package-agreements --accept-source-agreements --silent --disable-interactivity *>&1 | Out-Null
 }
 
+function Write-Utf8NoBom([string]$Path, [string]$Content) {
+  $dir = Split-Path -Parent $Path
+  if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+  $encoding = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+}
+
+function Ensure-MarkdownImport([string]$Path, [string]$ImportLine) {
+  if (-not (Test-Path -LiteralPath $Path)) {
+    Write-Utf8NoBom $Path "$ImportLine`n"
+    return
+  }
+  $content = Get-Content -LiteralPath $Path -Raw
+  if ($content -notmatch "(?m)^$([regex]::Escape($ImportLine))\s*$") {
+    Write-Utf8NoBom $Path "$ImportLine`n`n$content"
+  }
+}
+
+function Ensure-GeminiRtkConfig([string]$RtkExe) {
+  if (-not (Test-Cmd 'gemini')) { return }
+  $geminiDir = Join-Path $env:USERPROFILE '.gemini'
+  if (-not (Test-Path -LiteralPath $geminiDir)) { New-Item -ItemType Directory -Force -Path $geminiDir | Out-Null }
+  $rtkMd = @(
+    '# RTK - Rust Token Killer (Gemini CLI)'
+    ''
+    '**Usage**: Token-optimized CLI proxy for shell commands.'
+    ''
+    '## Rule'
+    ''
+    'Always prefix shell commands with `rtk`.'
+    ''
+    'Examples:'
+    ''
+    '```bash'
+    'rtk git status'
+    'rtk cargo test'
+    'rtk npm run build'
+    'rtk pytest -q'
+    '```'
+    ''
+    '## Hook-Based Usage'
+    ''
+    'Shell commands are automatically rewritten by the Gemini CLI `BeforeTool` hook.'
+    'Example: `git status` -> `rtk git status` (transparent, 0 tokens overhead)'
+    ''
+    '## Meta Commands'
+    ''
+    '```bash'
+    'rtk gain            # Token savings analytics'
+    'rtk gain --history  # Recent command savings history'
+    'rtk proxy <cmd>     # Run raw command without filtering'
+    '```'
+    ''
+    '## Verification'
+    ''
+    '```bash'
+    'rtk --version'
+    'rtk gain'
+    'which rtk'
+    '```'
+  ) -join "`n"
+  Write-Utf8NoBom (Join-Path $geminiDir 'RTK.md') ($rtkMd + "`n")
+  Ensure-MarkdownImport (Join-Path $geminiDir 'GEMINI.md') '@RTK.md'
+  $settingsPath = Join-Path $geminiDir 'settings.json'
+  try {
+    $s = if (Test-Path -LiteralPath $settingsPath) { Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
+    if (-not $s.PSObject.Properties['hooks']) { $s | Add-Member -MemberType NoteProperty -Name hooks -Value ([pscustomobject]@{}) }
+    if (-not $s.hooks.PSObject.Properties['BeforeTool']) { $s.hooks | Add-Member -MemberType NoteProperty -Name BeforeTool -Value @() }
+    $kept = @()
+    foreach ($entry in @($s.hooks.BeforeTool)) {
+      $hasRtkGemini = $false
+      foreach ($h in @($entry.hooks)) {
+        if ($h.type -eq 'command' -and (($h.command -as [string]) -match 'rtk(\.exe)?\s+hook\s+gemini')) { $hasRtkGemini = $true }
+      }
+      if ($entry.matcher -eq 'run_shell_command' -and $hasRtkGemini) { continue }
+      $kept += $entry
+    }
+    $kept += [pscustomobject]@{ matcher = 'run_shell_command'; hooks = @([pscustomobject]@{ name = 'rtk-gemini-shell-prefix'; type = 'command'; command = "$RtkExe hook gemini" }) }
+    $s.hooks.BeforeTool = @($kept)
+    Write-Utf8NoBom $settingsPath (($s | ConvertTo-Json -Depth 20) + "`n")
+  } catch { }
+}
+
+function Test-AnyCmd([string[]]$CommandNames) {
+  foreach ($name in $CommandNames) { if (Test-Cmd $name) { return $true } }
+  return $false
+}
+
+function Invoke-RtkInitIfCommand {
+  param([string]$RtkExe, [string[]]$CommandNames, [string[]]$InitArgs)
+  if (Test-AnyCmd $CommandNames) { & $RtkExe init -g @InitArgs *>&1 | Out-Null }
+}
+
 # Rebuild rtk from latest git master if it's already installed. Mirrors the
 # install path: bust the cargo git checkout cache for the rtk repo (without
 # this, `cargo install --git --force` silently reuses a stale checkout and
@@ -817,18 +1058,27 @@ function Update-Rtk {
   $cargo = Join-Path $cargoBin 'cargo.exe'
   $rtk = Join-Path $cargoBin 'rtk.exe'
   if (-not (Test-Path -LiteralPath $cargo) -or -not (Test-Path -LiteralPath $rtk)) { return }
-  foreach ($sub in @('checkouts','db')) {
-    $root = Join-Path $env:USERPROFILE ".cargo\git\$sub"
-    if (Test-Path -LiteralPath $root) {
-      Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like 'rtk-*' } |
-        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+  $activeRtk = @(Get-Process -Name 'rtk' -ErrorAction SilentlyContinue)
+  if ($activeRtk.Count -eq 0) {
+    foreach ($sub in @('checkouts','db')) {
+      $root = Join-Path $env:USERPROFILE ".cargo\git\$sub"
+      if (Test-Path -LiteralPath $root) {
+        Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+          Where-Object { $_.Name -like 'rtk-*' } |
+          ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+      }
     }
+    & $cargo install --git https://github.com/rtk-ai/rtk --branch master --force *>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { return }
   }
-  & $cargo install --git https://github.com/rtk-ai/rtk --branch master --force *>&1 | Out-Null
-  if ($LASTEXITCODE -ne 0) { return }
   if (Test-Cmd 'claude') { & $rtk init -g --auto-patch *>&1 | Out-Null }
   if (Test-Cmd 'codex')  { & $rtk init -g --codex *>&1 | Out-Null }
+  Invoke-RtkInitIfCommand -RtkExe $rtk -CommandNames @('copilot','github-copilot-cli','github-copilot') -InitArgs @('--copilot')
+  Invoke-RtkInitIfCommand -RtkExe $rtk -CommandNames @('opencode') -InitArgs @('--opencode')
+  foreach ($agent in @('cursor','windsurf','cline','kilocode','antigravity','hermes')) {
+    Invoke-RtkInitIfCommand -RtkExe $rtk -CommandNames @($agent) -InitArgs @('--agent',$agent)
+  }
+  Ensure-GeminiRtkConfig $rtk
 
   $settingsPath = Join-Path $env:USERPROFILE '.claude\settings.json'
   if (Test-Path -LiteralPath $settingsPath) {
