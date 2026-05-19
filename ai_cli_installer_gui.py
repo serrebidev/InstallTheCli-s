@@ -1,8 +1,10 @@
 import ctypes
 import glob
 import html
+import json
 import os
 import posixpath
+import re
 import shlex
 import shutil
 import stat
@@ -32,6 +34,10 @@ OLLAMA_WINGET_ID = "Ollama.Ollama"
 LINUX_OLLAMA_INSTALL_URL = "https://ollama.com/install.sh"
 OPENCLAW_INSTALL_URL = "https://openclaw.ai/install.sh"
 HOMEBREW_INSTALL_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
+RUSTUP_INIT_URL = "https://sh.rustup.rs"
+RUSTUP_WINGET_ID = "Rustlang.Rustup"
+RTK_GIT_URL = "https://github.com/rtk-ai/rtk"
+RTK_GIT_BRANCH = "master"
 AUTO_UPDATE_TASK_NAME = "InstallTheCli - Update AI CLIs"
 AUTO_UPDATE_DAILY_TIME = "3:00AM"
 AUTO_UPDATE_DIR_NAME = "InstallTheCli"
@@ -69,6 +75,11 @@ class CliSpec:
     macos_official_install_url: Optional[str] = None
     macos_requires_node_major: Optional[int] = None
     macos_requires_node_version: Optional[tuple[int, int, int]] = None
+    # rtk-style cargo-from-git install. When set, the CLI is built from the
+    # given git URL on the given branch via `cargo install --git`, instead
+    # of npm/brew/winget.
+    cargo_git_url: Optional[str] = None
+    cargo_git_branch: Optional[str] = None
     optional: bool = False
 
 
@@ -184,6 +195,17 @@ CLI_SPECS: tuple[CliSpec, ...] = (
         command_candidates=("ironclaw",),
         shortcut_name="IronClaw CLI",
         macos_brew_formula="ironclaw",
+        optional=True,
+    ),
+    CliSpec(
+        key="rtk",
+        label="RTK (Rust Token Killer)",
+        help_text="Installs rtk-ai/rtk from git master via cargo (Rust toolchain installed automatically if missing).",
+        package_candidates=("rtk",),
+        command_candidates=("rtk",),
+        shortcut_name="RTK",
+        cargo_git_url=RTK_GIT_URL,
+        cargo_git_branch=RTK_GIT_BRANCH,
         optional=True,
     ),
 )
@@ -753,6 +775,60 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "    }",
         "  } catch { }",
         "}",
+        # Rebuild rtk from latest git master if it's already installed. Bust
+        # the cargo git checkout cache for the rtk repo first; without this,
+        # `cargo install --git --force` silently reuses a stale checkout and
+        # rebuilds the same old SHA when only the master ref has moved. Then
+        # rebuild from --branch master. Re-run rtk init for Claude/Codex and
+        # normalize the Claude Code hook command to the POSIX absolute path
+        # Git Bash can resolve (rtk init registers it as bare `rtk`, which
+        # fails because Claude Code runs PreToolUse hooks via Git Bash).
+        "function Update-Rtk {",
+        "  $cargoBin = Join-Path $env:USERPROFILE '.cargo\\bin'",
+        "  $cargoExe = Join-Path $cargoBin 'cargo.exe'",
+        "  $rtkExe = Join-Path $cargoBin 'rtk.exe'",
+        "  if (-not (Test-Path -LiteralPath $cargoExe) -or -not (Test-Path -LiteralPath $rtkExe)) { return }",
+        "  foreach ($sub in @('checkouts','db')) {",
+        "    $root = Join-Path $env:USERPROFILE \".cargo\\git\\$sub\"",
+        "    if (Test-Path -LiteralPath $root) {",
+        "      Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |",
+        "        Where-Object { $_.Name -like 'rtk-*' } |",
+        "        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }",
+        "    }",
+        "  }",
+        "  & $cargoExe install --git https://github.com/rtk-ai/rtk --branch master --force *>&1 | Out-Null",
+        "  if ($LASTEXITCODE -ne 0) { return }",
+        "  if (Get-Command claude -ErrorAction SilentlyContinue) { & $rtkExe init -g --auto-patch *>&1 | Out-Null }",
+        "  if (Get-Command codex -ErrorAction SilentlyContinue) { & $rtkExe init -g --codex *>&1 | Out-Null }",
+        "  $settingsPath = Join-Path $env:USERPROFILE '.claude\\settings.json'",
+        "  if (Test-Path -LiteralPath $settingsPath) {",
+        "    try {",
+        "      $s = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json",
+        "      if ($s.hooks -and $s.hooks.PreToolUse) {",
+        "        $userLeaf = Split-Path -Leaf $env:USERPROFILE",
+        "        $want = \"/c/Users/$userLeaf/.cargo/bin/rtk.exe hook claude\"",
+        "        $changed = $false",
+        "        $seen = @{}",
+        "        $kept = @()",
+        "        foreach ($entry in $s.hooks.PreToolUse) {",
+        "          if ($entry.matcher -ne 'Bash') { $kept += $entry; continue }",
+        "          foreach ($h in $entry.hooks) {",
+        "            if ($h.type -eq 'command' -and $h.command -match 'rtk(\\.exe)?\\s+hook\\s+claude' -and $h.command -ne $want) {",
+        "              $h.command = $want; $changed = $true",
+        "            }",
+        "          }",
+        "          $key = ($entry.hooks | ForEach-Object { $_.command }) -join '|'",
+        "          if ($seen.ContainsKey($key)) { $changed = $true } else { $seen[$key] = $true; $kept += $entry }",
+        "        }",
+        "        if ($changed) {",
+        "          $s.hooks.PreToolUse = $kept",
+        "          ($s | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $settingsPath -Encoding utf8",
+        "        }",
+        "      }",
+        "    } catch { }",
+        "  }",
+        "}",
+        "Update-Rtk",
         "exit 0",
     ]
     return "\n".join(lines) + "\n"
@@ -1062,6 +1138,25 @@ if [[ -n "$brew_bin" ]]; then
 fi
 
 {npm_lines}
+
+# Rebuild rtk from latest git master if it's already installed. Mirror of the
+# install path: bust the cargo git checkout cache for the rtk repo (without
+# this, `cargo install --git --force` reuses a stale checkout and rebuilds
+# the same old SHA when only the master ref has moved), then rebuild from
+# --branch master. Re-run rtk init for Claude/Codex so any newly-added hook
+# capabilities land.
+update_rtk() {{
+  local cargo_exe="${{HOME}}/.cargo/bin/cargo"
+  local rtk_exe="${{HOME}}/.cargo/bin/rtk"
+  [[ -x "$cargo_exe" && -x "$rtk_exe" ]] || return 0
+  for d in "${{HOME}}/.cargo/git/checkouts/"rtk-* "${{HOME}}/.cargo/git/db/"rtk-*; do
+    [[ -d "$d" ]] && rm -rf "$d"
+  done
+  "$cargo_exe" install --git https://github.com/rtk-ai/rtk --branch master --force >/dev/null 2>&1 || return 0
+  command_exists claude && "$rtk_exe" init -g --auto-patch >/dev/null 2>&1 || true
+  command_exists codex && "$rtk_exe" init -g --codex >/dev/null 2>&1 || true
+}}
+update_rtk
 """
 
 
@@ -1772,6 +1867,15 @@ def get_python_cli_bin_dirs(log: Callable[[str], None]) -> list[str]:
     return unique
 
 
+def get_rtk_cli_bin_dirs(log: Callable[[str], None]) -> list[str]:
+    """Return the directories that contain rtk after a cargo install."""
+    del log  # kept for call-shape consistency with the other helpers
+    dirs: list[str] = [os.path.join(os.path.expanduser("~"), ".cargo", "bin")]
+    if is_linux():
+        dirs.append(os.path.join(os.path.expanduser("~"), ".local", "bin"))
+    return [d for d in dirs if d and os.path.isdir(d)]
+
+
 def get_ollama_cli_bin_dirs(log: Callable[[str], None]) -> list[str]:
     del log  # reserved for future diagnostics to keep call shape consistent with other helpers
     dirs: list[str] = []
@@ -2356,6 +2460,244 @@ def _find_python_for_mistral_uninstall() -> Optional[list[str]]:
         if exe:
             return [exe]
     return None
+
+
+def find_cargo() -> Optional[str]:
+    """Locate cargo.exe / cargo on PATH or in the user's cargo bin dir."""
+    cargo = shutil.which("cargo")
+    if cargo:
+        return cargo
+    candidate = os.path.join(os.path.expanduser("~"), ".cargo", "bin", "cargo.exe" if is_windows() else "cargo")
+    if os.path.isfile(candidate):
+        return candidate
+    return None
+
+
+def ensure_rust_toolchain(log: Callable[[str], None]) -> str:
+    """Ensure cargo is available; install rustup via the platform's preferred path."""
+    cargo = find_cargo()
+    if cargo:
+        log(f"Rust toolchain available: {cargo}")
+        return cargo
+
+    if is_windows():
+        log("Installing Rust toolchain (Rustup) via winget...")
+        code = run_command(
+            [
+                "winget",
+                "install",
+                "--id",
+                RUSTUP_WINGET_ID,
+                "-e",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+                "--silent",
+                "--disable-interactivity",
+            ],
+            log,
+        )
+        if code != 0:
+            raise RuntimeError(f"winget Rustup install failed with exit code {format_exit_code(code)}")
+    elif is_macos():
+        ensure_homebrew(log)
+        ok, detail = brew_install_or_upgrade("rustup", log)
+        if not ok:
+            log(f"Homebrew rustup install warning: {detail}; falling back to rustup-init")
+            code = run_command(
+                ["/bin/bash", "-c", f"curl -fsSL {RUSTUP_INIT_URL} | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path"],
+                log,
+            )
+            if code != 0:
+                raise RuntimeError(f"rustup-init failed with exit code {format_exit_code(code)}")
+    else:
+        log("Installing Rust toolchain via rustup-init (stable, minimal)...")
+        code = run_command(
+            ["/bin/sh", "-c", f"curl -fsSL {RUSTUP_INIT_URL} | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path"],
+            log,
+        )
+        if code != 0:
+            raise RuntimeError(f"rustup-init failed with exit code {format_exit_code(code)}")
+
+    cargo = find_cargo()
+    if not cargo:
+        raise RuntimeError("cargo was not found after Rust toolchain install. Open a new shell and rerun.")
+    return cargo
+
+
+def _clear_cargo_git_cache_for(repo_prefix: str, log: Callable[[str], None]) -> None:
+    """Delete cached git checkouts/db entries matching `repo_prefix-*` so cargo
+    refetches the upstream ref. Without this, `cargo install --git --force`
+    reuses a stale checkout and rebuilds the same old SHA when only the
+    upstream branch ref has moved (the rtk repo was bitten by this stuck at
+    0.34.3 while master had moved to 0.40.0)."""
+    cargo_root = os.path.join(os.path.expanduser("~"), ".cargo", "git")
+    for sub in ("checkouts", "db"):
+        root = os.path.join(cargo_root, sub)
+        if not os.path.isdir(root):
+            continue
+        for entry in os.listdir(root):
+            if not entry.startswith(repo_prefix + "-"):
+                continue
+            target = os.path.join(root, entry)
+            log(f"Clearing cargo git cache: {target}")
+            try:
+                shutil.rmtree(target, ignore_errors=True)
+            except OSError as exc:
+                log(f"Warning: could not remove {target}: {exc}")
+
+
+def try_install_rtk(
+    spec: CliSpec,
+    log: Callable[[str], None],
+) -> tuple[bool, Optional[str]]:
+    """Install rtk from git master via cargo. Mirror of the
+    bash/PowerShell install_rtk paths: bust cargo's git checkout cache for
+    the rtk repo, build from --branch master, then run rtk init for Claude
+    Code / Codex if those CLIs are present."""
+    try:
+        cargo = ensure_rust_toolchain(log)
+    except RuntimeError as exc:
+        err = str(exc)
+        log(err)
+        return (False, err)
+
+    git_url = spec.cargo_git_url or RTK_GIT_URL
+    branch = spec.cargo_git_branch or RTK_GIT_BRANCH
+    repo_basename = posixpath.basename(git_url.rstrip("/"))
+    if repo_basename.endswith(".git"):
+        repo_basename = repo_basename[:-4]
+    _clear_cargo_git_cache_for(repo_basename, log)
+
+    log(f"Installing {spec.label} from {git_url} (branch {branch}) via cargo")
+    code = run_command(
+        [cargo, "install", "--git", git_url, "--branch", branch, "--force"],
+        log,
+    )
+    if code != 0:
+        err = f"cargo install {spec.label} failed with exit code {format_exit_code(code)}"
+        log(err)
+        return (False, err)
+
+    cargo_bin_dir = os.path.dirname(cargo)
+    rtk_exe = os.path.join(cargo_bin_dir, "rtk.exe" if is_windows() else "rtk")
+    if not os.path.isfile(rtk_exe):
+        err = f"{spec.label} binary not found at {rtk_exe} after install"
+        log(err)
+        return (False, err)
+
+    if shutil.which("claude"):
+        log("Registering rtk hook for Claude Code")
+        run_command([rtk_exe, "init", "-g", "--auto-patch"], log)
+        if is_windows():
+            _normalize_claude_rtk_hook(log)
+    if shutil.which("codex"):
+        log("Registering rtk for Codex CLI")
+        run_command([rtk_exe, "init", "-g", "--codex"], log)
+
+    # Linux: surface rtk on PATH for any login shell. /root/.local/bin (or
+    # ~/.local/bin) is on PATH via ~/.profile on Debian-family accounts but
+    # the cargo bin dir is not, so a symlink there is the simplest fix.
+    if is_linux():
+        local_bin = os.path.join(os.path.expanduser("~"), ".local", "bin")
+        try:
+            os.makedirs(local_bin, exist_ok=True)
+            link_target = os.path.join(local_bin, "rtk")
+            if os.path.islink(link_target) or os.path.exists(link_target):
+                os.unlink(link_target)
+            os.symlink(rtk_exe, link_target)
+            log(f"Linked {link_target} -> {rtk_exe}")
+        except OSError as exc:
+            log(f"Warning: could not create ~/.local/bin/rtk symlink: {exc}")
+
+    return (True, spec.package_candidates[0] if spec.package_candidates else "rtk")
+
+
+def _normalize_claude_rtk_hook(log: Callable[[str], None]) -> None:
+    """Rewrite the Claude Code PreToolUse Bash hook command to use the
+    POSIX-style absolute path Git Bash can resolve. `rtk init --auto-patch`
+    registers it as bare `rtk hook claude`, which works from PowerShell/cmd
+    (Windows PATH has the cargo bin dir) but fails from Git Bash because
+    Git Bash does not inherit Windows PATH. Also dedupes duplicate
+    Bash-matcher blocks left behind by repeated init runs."""
+    settings_path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    if not os.path.isfile(settings_path):
+        return
+    try:
+        with open(settings_path, "r", encoding="utf-8") as fh:
+            settings = json.load(fh)
+    except (OSError, ValueError) as exc:
+        log(f"Warning: could not read {settings_path}: {exc}")
+        return
+    hooks = settings.get("hooks", {}).get("PreToolUse")
+    if not hooks:
+        return
+    user_leaf = os.path.basename(os.environ.get("USERPROFILE", os.path.expanduser("~")))
+    want = f"/c/Users/{user_leaf}/.cargo/bin/rtk.exe hook claude"
+    rtk_pattern = re.compile(r"rtk(\.exe)?\s+hook\s+claude")
+    changed = False
+    seen: dict[str, bool] = {}
+    kept: list[dict] = []
+    for entry in hooks:
+        if entry.get("matcher") != "Bash":
+            kept.append(entry)
+            continue
+        for h in entry.get("hooks", []):
+            cmd = h.get("command", "")
+            if h.get("type") == "command" and rtk_pattern.search(cmd) and cmd != want:
+                h["command"] = want
+                changed = True
+        key = "|".join(h.get("command", "") for h in entry.get("hooks", []))
+        if key in seen:
+            changed = True
+        else:
+            seen[key] = True
+            kept.append(entry)
+    if changed:
+        settings["hooks"]["PreToolUse"] = kept
+        try:
+            with open(settings_path, "w", encoding="utf-8") as fh:
+                json.dump(settings, fh, indent=2)
+            log(f"Normalized Claude Code rtk hook in {settings_path}")
+        except OSError as exc:
+            log(f"Warning: could not write {settings_path}: {exc}")
+
+
+def try_uninstall_rtk(
+    spec: CliSpec,
+    log: Callable[[str], None],
+) -> tuple[bool, Optional[str]]:
+    """Uninstall rtk by removing the cargo-installed binary and the
+    convenience symlink at ~/.local/bin/rtk (Linux). The Rust toolchain
+    itself is left in place since the user may use it for other tools."""
+    package_name = spec.package_candidates[0] if spec.package_candidates else "rtk"
+    cargo = find_cargo()
+    saw_success = False
+    if cargo:
+        log(f"Uninstalling {spec.label} via cargo")
+        code = run_command([cargo, "uninstall", "rtk"], log)
+        if code == 0:
+            saw_success = True
+        else:
+            log(f"cargo uninstall rtk exited with code {format_exit_code(code)}")
+    else:
+        log("cargo not found; removing rtk binary directly.")
+    rtk_exe = os.path.join(os.path.expanduser("~"), ".cargo", "bin", "rtk.exe" if is_windows() else "rtk")
+    if os.path.isfile(rtk_exe):
+        try:
+            os.unlink(rtk_exe)
+            saw_success = True
+        except OSError as exc:
+            log(f"Warning: could not remove {rtk_exe}: {exc}")
+    if is_linux():
+        link_target = os.path.join(os.path.expanduser("~"), ".local", "bin", "rtk")
+        if os.path.islink(link_target) or os.path.isfile(link_target):
+            try:
+                os.unlink(link_target)
+            except OSError as exc:
+                log(f"Warning: could not remove {link_target}: {exc}")
+    if saw_success:
+        return (True, package_name)
+    return (True, package_name)
 
 
 def try_uninstall_mistral_vibe(
@@ -3930,12 +4272,16 @@ class InstallerFrame(wx.Frame):
                     success, detail = try_uninstall_mistral_vibe(spec, self.log)
                 elif spec.key == "ollama":
                     success, detail = try_uninstall_ollama(self.log)
+                elif spec.key == "rtk":
+                    success, detail = try_uninstall_rtk(spec, self.log)
                 else:
                     success, detail = try_uninstall_macos_cli(spec, self.log)
             elif spec.key == "mistral":
                 success, detail = try_uninstall_mistral_vibe(spec, self.log)
             elif spec.key == "ollama":
                 success, detail = try_uninstall_ollama(self.log)
+            elif spec.key == "rtk":
+                success, detail = try_uninstall_rtk(spec, self.log)
             else:
                 assert npm_exe is not None
                 success, detail = try_uninstall_package_candidates(npm_exe, spec, self.log)
@@ -3948,7 +4294,7 @@ class InstallerFrame(wx.Frame):
 
             self.log(f"Uninstall completed for {spec.label}.")
             remove_cli_desktop_shortcuts(spec, self.log)
-            if spec.key not in ("mistral", "ollama"):
+            if spec.key not in ("mistral", "ollama", "rtk"):
                 removed_npm_packages.extend(spec.package_candidates)
 
         if removed_npm_packages and is_windows():
@@ -3977,6 +4323,7 @@ class InstallerFrame(wx.Frame):
             )
         needs_python_cli_dirs = any(spec.key == "mistral" for spec in selected)
         needs_ollama_cli_dirs = any(spec.key == "ollama" for spec in selected)
+        needs_rtk_cli_dirs = any(spec.key == "rtk" for spec in selected)
 
         self.set_status("Checking/installing requirements")
         self.set_gauge(5)
@@ -3987,7 +4334,7 @@ class InstallerFrame(wx.Frame):
                 spec.macos_requires_node_version or (spec.macos_requires_node_major or 20, 0, 0)
                 for spec in selected
                 if spec.macos_requires_node_major
-                or (not spec.macos_brew_formula and not spec.macos_brew_cask and spec.key not in ("mistral", "ollama"))
+                or (not spec.macos_brew_formula and not spec.macos_brew_cask and spec.key not in ("mistral", "ollama", "rtk"))
             ]
             if required_node_versions:
                 required = max(required_node_versions)
@@ -4014,6 +4361,8 @@ class InstallerFrame(wx.Frame):
             cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_python_cli_bin_dirs(self.log))
         if needs_ollama_cli_dirs:
             cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_ollama_cli_bin_dirs(self.log))
+        if needs_rtk_cli_dirs:
+            cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_rtk_cli_bin_dirs(self.log))
         self.log("PATH directories to ensure: " + (", ".join(cli_bin_dirs) if cli_bin_dirs else "(none found yet)"))
 
         self.set_status("Updating user/system PATH")
@@ -4049,12 +4398,16 @@ class InstallerFrame(wx.Frame):
                     success, pkg = try_install_mistral_vibe(spec, self.log)
                 elif spec.key == "ollama":
                     success, pkg = ensure_ollama_via_winget(self.log)
+                elif spec.key == "rtk":
+                    success, pkg = try_install_rtk(spec, self.log)
                 else:
                     success, pkg = try_install_macos_cli(spec, self.log)
             elif spec.key == "mistral":
                 success, pkg = try_install_mistral_vibe(spec, self.log)
             elif spec.key == "ollama":
                 success, pkg = ensure_ollama_via_winget(self.log)
+            elif spec.key == "rtk":
+                success, pkg = try_install_rtk(spec, self.log)
             else:
                 success, pkg = try_install_package_candidates(npm_exe, spec, self.log)
             if not success:
@@ -4078,7 +4431,7 @@ class InstallerFrame(wx.Frame):
 
             assert pkg is not None
             self.log(f"Installed {spec.label} using package {pkg}")
-            if not is_macos() and spec.key not in ("mistral", "ollama"):
+            if not is_macos() and spec.key not in ("mistral", "ollama", "rtk"):
                 installed_packages.append(pkg)
 
             cli_bin_dirs = get_cli_bin_dirs(npm_exe, self.log)
@@ -4086,6 +4439,8 @@ class InstallerFrame(wx.Frame):
                 cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_python_cli_bin_dirs(self.log))
             if spec.key == "ollama":
                 cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_ollama_cli_bin_dirs(self.log))
+            if spec.key == "rtk":
+                cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_rtk_cli_bin_dirs(self.log))
             command_path = resolve_command_path(spec.command_candidates, cli_bin_dirs)
             if command_path:
                 self.log(f"Resolved command path for {spec.label}: {command_path}")
@@ -4100,6 +4455,8 @@ class InstallerFrame(wx.Frame):
             cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_python_cli_bin_dirs(self.log))
         if needs_ollama_cli_dirs:
             cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_ollama_cli_bin_dirs(self.log))
+        if needs_rtk_cli_dirs:
+            cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_rtk_cli_bin_dirs(self.log))
         added_user, user_err = add_dirs_to_path("user", cli_bin_dirs)
         if user_err:
             self.log(f"User PATH refresh warning: {user_err}")

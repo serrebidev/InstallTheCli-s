@@ -20,6 +20,7 @@ By default it can install:
 - IronClaw CLI (`ironclaw`)
 - Mistral Vibe CLI (`mistral-vibe`)
 - Ollama (official version + `ollama` CLI)
+- RTK (Rust Token Killer, `rtk-ai/rtk` from git master via cargo) — opt-in, requires `install rtk`
 
 From the GUI, it can also install desktop AI apps (or shortcuts), including:
 - Claude App
@@ -282,6 +283,7 @@ openclaw
 ironclaw
 vibe
 ollama
+rtk
 ```
 
 If one fails, rerun the installer for that target only.

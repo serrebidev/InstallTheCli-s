@@ -62,6 +62,8 @@ $ErrorActionPreference = 'Stop'
 $NodeWingetId = 'OpenJS.NodeJS.LTS'
 $PythonWingetId = 'Python.Python.3.14'
 $OllamaWingetId = 'Ollama.Ollama'
+$RustupWingetId = 'Rustlang.Rustup'
+$RtkGitUrl = 'https://github.com/rtk-ai/rtk'
 $AutoUpdateTaskName = 'InstallTheCli - Update AI CLIs'
 $LocalAppDataRoot = if ($env:LocalAppData) { $env:LocalAppData } else { Join-Path $HOME 'AppData\Local' }
 $SupportDir = Join-Path $LocalAppDataRoot 'InstallTheCli'
@@ -281,6 +283,129 @@ function Install-OllamaOfficial {
         }
     }
     Write-Log 'Installed/updated Ollama (official).'
+}
+
+function Get-CargoPath {
+    $cmd = Get-Command cargo -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $candidate = Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe'
+    if (Test-Path -LiteralPath $candidate) { return $candidate }
+    return $null
+}
+
+function Ensure-RustToolchain {
+    $cargo = Get-CargoPath
+    if ($cargo) {
+        Write-Log "Rust toolchain is already available: $cargo"
+        return $cargo
+    }
+    $winget = Get-WingetPath
+    if (-not $winget) {
+        Throw-InstallError 'winget was not found. Install Microsoft App Installer / winget first, or install Rust manually from https://rustup.rs/.'
+    }
+    Write-Log 'Installing Rust toolchain (Rustup) via winget...'
+    $code = Invoke-ExternalCommand -Args @($winget, 'install', '--id', $RustupWingetId, '-e', '--accept-package-agreements', '--accept-source-agreements', '--silent', '--disable-interactivity')
+    if ($code -ne 0) {
+        Throw-InstallError "winget Rustup install failed with exit code $code."
+    }
+    $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
+    if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $cargoBin })) {
+        $env:PATH = "$cargoBin;$env:PATH"
+    }
+    $cargo = Get-CargoPath
+    if (-not $cargo) {
+        Throw-InstallError 'cargo.exe was not found after Rustup install. Open a new shell and rerun.'
+    }
+    return $cargo
+}
+
+# Install RTK (Rust Token Killer) from git master via cargo. The cargo git
+# checkout cache for the rtk repo is cleared first; without this, `cargo
+# install --git --force` silently reuses a stale checkout and rebuilds the
+# same old SHA when only the master ref has moved (we hit this stuck at
+# 0.34.3 while master had moved to 0.40.0).
+function Install-Rtk {
+    $cargo = Ensure-RustToolchain
+    $cargoBin = Split-Path -Parent $cargo
+    $cargoGitDir = Join-Path $env:USERPROFILE '.cargo\git'
+    foreach ($sub in @('checkouts', 'db')) {
+        $root = Join-Path $cargoGitDir $sub
+        if (Test-Path -LiteralPath $root) {
+            Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'rtk-*' } |
+                ForEach-Object {
+                    Write-Log "Clearing cargo git cache: $($_.FullName)"
+                    if (-not $DryRun) {
+                        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                }
+        }
+    }
+
+    Write-Log "Installing rtk from $RtkGitUrl (branch master) via cargo..."
+    $code = Invoke-ExternalCommand -Args @($cargo, 'install', '--git', $RtkGitUrl, '--branch', 'master', '--force')
+    if ($code -ne 0) {
+        Throw-InstallError "cargo install rtk failed with exit code $code."
+    }
+
+    $rtkExe = Join-Path $cargoBin 'rtk.exe'
+    if (-not $DryRun -and (Test-Path -LiteralPath $rtkExe)) {
+        if (Get-Command claude -ErrorAction SilentlyContinue) {
+            Write-Log 'Registering rtk hook for Claude Code'
+            [void](Invoke-ExternalCommand -Args @($rtkExe, 'init', '-g', '--auto-patch'))
+            Update-ClaudeRtkHookCommand
+        }
+        if (Get-Command codex -ErrorAction SilentlyContinue) {
+            Write-Log 'Registering rtk for Codex CLI'
+            [void](Invoke-ExternalCommand -Args @($rtkExe, 'init', '-g', '--codex'))
+        }
+        Write-Log "Installed rtk: $(& $rtkExe --version 2>&1)"
+    }
+}
+
+# Claude Code on Windows runs PreToolUse hooks through Git Bash (/usr/bin/bash),
+# whose PATH does NOT include the cargo bin dir. The bare `rtk hook claude`
+# command that `rtk init --auto-patch` registers therefore fails with
+# "command not found" from Git Bash. Rewrite the hook command in
+# ~/.claude/settings.json to use the POSIX-style absolute path Git Bash
+# can resolve, and dedupe any duplicate Bash-matcher blocks that repeated
+# init runs leave behind.
+function Update-ClaudeRtkHookCommand {
+    if ($DryRun) { return }
+    $settingsPath = Join-Path $env:USERPROFILE '.claude\settings.json'
+    if (-not (Test-Path -LiteralPath $settingsPath)) { return }
+    try {
+        $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+        if (-not $settings.hooks -or -not $settings.hooks.PreToolUse) { return }
+        $rtkPosix = '/c/Users/' + (Split-Path -Leaf $env:USERPROFILE) + '/.cargo/bin/rtk.exe'
+        $want = "$rtkPosix hook claude"
+        $changed = $false
+        $seen = @{}
+        $kept = @()
+        foreach ($entry in $settings.hooks.PreToolUse) {
+            if ($entry.matcher -ne 'Bash') { $kept += $entry; continue }
+            foreach ($h in $entry.hooks) {
+                if ($h.type -eq 'command' -and $h.command -match 'rtk(\.exe)?\s+hook\s+claude' -and $h.command -ne $want) {
+                    $h.command = $want
+                    $changed = $true
+                }
+            }
+            $key = ($entry.hooks | ForEach-Object { $_.command }) -join '|'
+            if ($seen.ContainsKey($key)) {
+                $changed = $true
+            } else {
+                $seen[$key] = $true
+                $kept += $entry
+            }
+        }
+        if ($changed) {
+            $settings.hooks.PreToolUse = $kept
+            ($settings | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $settingsPath -Encoding utf8
+            Write-Log 'Normalized Claude Code rtk hook to absolute Git-Bash path'
+        }
+    } catch {
+        Write-WarnLog "Could not normalize Claude rtk hook: $($_.Exception.Message)"
+    }
 }
 
 function Repair-ClaudeAfterFailedUpdate {
@@ -679,6 +804,62 @@ if (Test-Cmd "uv") {
 if (Test-Cmd "winget") {
   & winget upgrade --id Ollama.Ollama -e --accept-package-agreements --accept-source-agreements --silent --disable-interactivity *>&1 | Out-Null
 }
+
+# Rebuild rtk from latest git master if it's already installed. Mirrors the
+# install path: bust the cargo git checkout cache for the rtk repo (without
+# this, `cargo install --git --force` silently reuses a stale checkout and
+# rebuilds the same old SHA), then rebuild from --branch master. Refresh the
+# rtk hook in Claude's settings.json so it survives `rtk init --auto-patch`
+# re-registering the bare-name command (Claude Code runs PreToolUse hooks
+# through Git Bash, which can't resolve bare `rtk` without cargo on PATH).
+function Update-Rtk {
+  $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
+  $cargo = Join-Path $cargoBin 'cargo.exe'
+  $rtk = Join-Path $cargoBin 'rtk.exe'
+  if (-not (Test-Path -LiteralPath $cargo) -or -not (Test-Path -LiteralPath $rtk)) { return }
+  foreach ($sub in @('checkouts','db')) {
+    $root = Join-Path $env:USERPROFILE ".cargo\git\$sub"
+    if (Test-Path -LiteralPath $root) {
+      Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like 'rtk-*' } |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+  }
+  & $cargo install --git https://github.com/rtk-ai/rtk --branch master --force *>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0) { return }
+  if (Test-Cmd 'claude') { & $rtk init -g --auto-patch *>&1 | Out-Null }
+  if (Test-Cmd 'codex')  { & $rtk init -g --codex *>&1 | Out-Null }
+
+  $settingsPath = Join-Path $env:USERPROFILE '.claude\settings.json'
+  if (Test-Path -LiteralPath $settingsPath) {
+    try {
+      $s = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+      if ($s.hooks -and $s.hooks.PreToolUse) {
+        $userLeaf = Split-Path -Leaf $env:USERPROFILE
+        $want = "/c/Users/$userLeaf/.cargo/bin/rtk.exe hook claude"
+        $changed = $false
+        $seen = @{}
+        $kept = @()
+        foreach ($entry in $s.hooks.PreToolUse) {
+          if ($entry.matcher -ne 'Bash') { $kept += $entry; continue }
+          foreach ($h in $entry.hooks) {
+            if ($h.type -eq 'command' -and $h.command -match 'rtk(\.exe)?\s+hook\s+claude' -and $h.command -ne $want) {
+              $h.command = $want
+              $changed = $true
+            }
+          }
+          $key = ($entry.hooks | ForEach-Object { $_.command }) -join '|'
+          if ($seen.ContainsKey($key)) { $changed = $true } else { $seen[$key] = $true; $kept += $entry }
+        }
+        if ($changed) {
+          $s.hooks.PreToolUse = $kept
+          ($s | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $settingsPath -Encoding utf8
+        }
+      }
+    } catch { }
+  }
+}
+Update-Rtk
 '@
 }
 
@@ -740,7 +921,7 @@ function Ensure-HiddenAutoUpdateTask {
 
 function Show-Targets {
     @(
-        'claude', 'codex', 'gemini', 'grok', 'qwen', 'copilot', 'openclaw', 'ironclaw', 'mistral', 'ollama', 'all'
+        'claude', 'codex', 'gemini', 'grok', 'qwen', 'copilot', 'openclaw', 'ironclaw', 'mistral', 'ollama', 'rtk', 'all'
     ) | ForEach-Object { Write-Host $_ }
 }
 
@@ -751,7 +932,7 @@ Usage:
 
 Commands:
   install-all              Install all supported CLIs (default)
-  install <target>         Install one target (claude/codex/gemini/grok/qwen/copilot/openclaw/ironclaw/mistral/ollama/all)
+  install <target>         Install one target (claude/codex/gemini/grok/qwen/copilot/openclaw/ironclaw/mistral/ollama/rtk/all)
   setup-updater            Configure hidden auto-update Scheduled Task only
   list                     List supported targets
   help                     Show help (or use: Get-Help .\install_all_windows.ps1 -Detailed)
@@ -773,6 +954,7 @@ function Install-Target {
         'mistral-vibe' { Install-MistralVibe }
         'vibe'    { Install-MistralVibe }
         'ollama'  { Install-OllamaOfficial }
+        'rtk'     { Install-Rtk }
         'all'     { Install-AllTargets }
         default   { Throw-InstallError "Unknown target: $NormalizedTarget" }
     }

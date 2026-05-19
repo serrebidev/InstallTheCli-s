@@ -57,6 +57,7 @@ This script installs:
     Mistral Vibe CLI, Ollama CLI, IronClaw CLI (Homebrew)
   - Grok CLI (npm, with Node.js installed by Homebrew if needed)
   - OpenClaw CLI (official installer, with Node.js 22.14+ installed by Homebrew if needed)
+  - RTK (Rust Token Killer) from git master via cargo (opt-in: 'install rtk')
   - launchd updater (RunAtLoad and daily) unless --no-launch-agent is used
 EOF
 }
@@ -74,12 +75,14 @@ Supported targets:
   ironclaw
   mistral
   ollama
+  rtk
   all
 
 Examples:
   ./install_all_macos.sh install codex
   ./install_all_macos.sh install openclaw
   ./install_all_macos.sh install mistral --no-launch-agent
+  ./install_all_macos.sh install rtk
   ./install_all_macos.sh install-all
   ./install_all_macos.sh setup-launch-agent
 EOF
@@ -277,6 +280,57 @@ install_all_targets() {
   brew_install_formula ollama
 }
 
+# Install rustup + cargo via Homebrew if missing. Homebrew's rustup formula
+# pulls down the stable toolchain on first use of `cargo`.
+ensure_rust_toolchain_macos() {
+  ensure_homebrew
+  if command_exists cargo; then
+    log "cargo already available: $(command -v cargo)"
+    return 0
+  fi
+  if "${BREW_BIN}" list --formula rustup >/dev/null 2>&1; then
+    log "rustup already installed via Homebrew; ensuring stable toolchain"
+  else
+    brew_install_formula rustup
+  fi
+  if (( ! DRY_RUN )); then
+    rustup default stable >/dev/null 2>&1 || run_cmd rustup-init -y --default-toolchain stable --profile minimal --no-modify-path
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+  fi
+  command_exists cargo || die "cargo not found after rustup install. Open a new terminal and rerun."
+}
+
+# Install rtk-ai/rtk from git master via cargo. Mirror the Linux/Windows
+# logic: clear cargo's git checkout cache for the rtk repo first, otherwise
+# `cargo install --git --force` may reuse a stale checkout and silently
+# rebuild the same old SHA when only the master ref has moved.
+install_rtk() {
+  ensure_rust_toolchain_macos
+  local cargo_bin
+  cargo_bin="$(dirname "$(command -v cargo)")"
+  for d in "${HOME}/.cargo/git/checkouts/"rtk-* "${HOME}/.cargo/git/db/"rtk-*; do
+    if [[ -d "$d" ]]; then
+      log "Clearing cargo git cache: $d"
+      run_cmd rm -rf "$d"
+    fi
+  done
+  log "Installing rtk from https://github.com/rtk-ai/rtk (branch master) via cargo"
+  run_cmd cargo install --git https://github.com/rtk-ai/rtk --branch master --force
+
+  local rtk_bin="${cargo_bin}/rtk"
+  if (( ! DRY_RUN )) && [[ -x "$rtk_bin" ]]; then
+    if command_exists claude; then
+      log "Registering rtk hook for Claude Code"
+      "$rtk_bin" init -g --auto-patch || warn "rtk init (Claude) failed"
+    fi
+    if command_exists codex; then
+      log "Registering rtk for Codex CLI"
+      "$rtk_bin" init -g --codex || warn "rtk init (Codex) failed"
+    fi
+    log "Installed rtk: $("$rtk_bin" --version 2>&1)"
+  fi
+}
+
 install_single_target() {
   local target_key
   target_key="$(lower "$1")"
@@ -292,6 +346,7 @@ install_single_target() {
     ironclaw) brew_install_formula ironclaw ;;
     mistral|mistral-vibe|vibe) brew_install_formula mistral-vibe ;;
     ollama) brew_install_formula ollama ;;
+    rtk) install_rtk ;;
     *) die "Unknown target: ${target_key}. Use '$SCRIPT_NAME list' to see supported targets." ;;
   esac
 }
@@ -363,6 +418,23 @@ fi
 
 update_npm_package "@vibe-kit/grok-cli"
 update_npm_package "openclaw"
+
+# Rebuild rtk from latest git master if it's already installed. Bust the
+# cargo git checkout cache for the rtk repo first; without this, cargo's
+# --force flag reuses a stale checkout and rebuilds the same old SHA when
+# only the master ref has moved.
+update_rtk() {
+  local cargo_exe="${HOME}/.cargo/bin/cargo"
+  local rtk_exe="${HOME}/.cargo/bin/rtk"
+  [[ -x "$cargo_exe" && -x "$rtk_exe" ]] || return 0
+  for d in "${HOME}/.cargo/git/checkouts/"rtk-* "${HOME}/.cargo/git/db/"rtk-*; do
+    [[ -d "$d" ]] && rm -rf "$d"
+  done
+  "$cargo_exe" install --git https://github.com/rtk-ai/rtk --branch master --force >/dev/null 2>&1 || return 0
+  command_exists claude && "$rtk_exe" init -g --auto-patch >/dev/null 2>&1 || true
+  command_exists codex && "$rtk_exe" init -g --codex >/dev/null 2>&1 || true
+}
+update_rtk
 EOF
 }
 
@@ -464,7 +536,7 @@ parse_args() {
     help)
       SUBCOMMAND="help"
       ;;
-    claude|codex|gemini|grok|qwen|copilot|openclaw|ironclaw|mistral|mistral-vibe|vibe|ollama|all)
+    claude|codex|gemini|grok|qwen|copilot|openclaw|ironclaw|mistral|mistral-vibe|vibe|ollama|rtk|all)
       SUBCOMMAND="install"
       TARGET="$command_name"
       ;;

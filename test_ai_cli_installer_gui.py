@@ -3967,5 +3967,126 @@ class AppEntrypointTests(unittest.TestCase):
         app.MainLoop.assert_called_once_with()
 
 
+class RtkIntegrationTests(unittest.TestCase):
+    """Tests for rtk-ai/rtk integration across CliSpec, installer scripts, and
+    GUI auto-update generators. rtk is the only target installed from git via
+    cargo (not npm/brew/winget), so it has its own dispatch and update logic."""
+
+    def test_rtk_cli_spec_uses_cargo_git_url_and_master_branch(self) -> None:
+        by_key = {spec.key: spec for spec in m.CLI_SPECS}
+        self.assertIn("rtk", by_key)
+        spec = by_key["rtk"]
+        self.assertEqual(spec.cargo_git_url, m.RTK_GIT_URL)
+        self.assertEqual(spec.cargo_git_branch, m.RTK_GIT_BRANCH)
+        self.assertEqual(spec.cargo_git_branch, "master")
+        self.assertEqual(spec.command_candidates, ("rtk",))
+        self.assertTrue(spec.optional, "rtk should be opt-in, not installed by default")
+        self.assertIsNone(spec.macos_brew_formula)
+        self.assertIsNone(spec.macos_brew_cask)
+        self.assertIsNone(spec.macos_official_install_url)
+
+    def test_rtk_install_dispatched_to_try_install_rtk(self) -> None:
+        spec = next(s for s in m.CLI_SPECS if s.key == "rtk")
+        with (
+            patch.object(m, "ensure_rust_toolchain", return_value="/fake/cargo"),
+            patch.object(m, "_clear_cargo_git_cache_for") as clear_mock,
+            patch.object(m, "run_command", return_value=0) as run_mock,
+            patch.object(m.os.path, "isfile", return_value=True),
+            patch.object(m.shutil, "which", return_value=None),
+            patch.object(m, "is_linux", return_value=False),
+        ):
+            ok, pkg = m.try_install_rtk(spec, lambda _msg: None)
+        self.assertTrue(ok)
+        self.assertEqual(pkg, "rtk")
+        clear_mock.assert_called_once_with("rtk", unittest.mock.ANY)
+        # The cargo invocation should pull from master with --force.
+        run_args = run_mock.call_args[0][0]
+        self.assertEqual(run_args[0], "/fake/cargo")
+        self.assertIn("install", run_args)
+        self.assertIn("--git", run_args)
+        self.assertIn(m.RTK_GIT_URL, run_args)
+        self.assertIn("--branch", run_args)
+        self.assertIn("master", run_args)
+        self.assertIn("--force", run_args)
+
+    def test_clear_cargo_git_cache_removes_only_matching_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(m.os.path, "expanduser", return_value=tmp):
+                checkouts = os.path.join(tmp, ".cargo", "git", "checkouts")
+                db = os.path.join(tmp, ".cargo", "git", "db")
+                os.makedirs(os.path.join(checkouts, "rtk-abc123"))
+                os.makedirs(os.path.join(checkouts, "other-xyz"))
+                os.makedirs(os.path.join(db, "rtk-abc123"))
+                m._clear_cargo_git_cache_for("rtk", lambda _msg: None)
+                self.assertFalse(os.path.isdir(os.path.join(checkouts, "rtk-abc123")))
+                self.assertFalse(os.path.isdir(os.path.join(db, "rtk-abc123")))
+                # Non-rtk repo cache should be untouched.
+                self.assertTrue(os.path.isdir(os.path.join(checkouts, "other-xyz")))
+
+    def test_linux_one_click_script_contains_rtk_target(self) -> None:
+        script_path = os.path.join(os.getcwd(), "install_all_linux.sh")
+        with open(script_path, "r", encoding="utf-8") as f:
+            script = f.read()
+        self.assertIn("install_rtk()", script)
+        self.assertIn("ensure_rust_toolchain", script)
+        self.assertIn("--branch master --force", script)
+        self.assertIn("rtk-ai/rtk", script)
+        self.assertIn("update_rtk", script)
+        # rtk must be a listed target and a parser alias.
+        self.assertIn("\n  rtk\n", script)
+        self.assertIn("ollama|rtk|all", script)
+
+    def test_macos_one_click_script_contains_rtk_target(self) -> None:
+        script_path = os.path.join(os.getcwd(), "install_all_macos.sh")
+        with open(script_path, "r", encoding="utf-8") as f:
+            script = f.read()
+        self.assertIn("install_rtk()", script)
+        self.assertIn("ensure_rust_toolchain_macos", script)
+        self.assertIn("--branch master --force", script)
+        self.assertIn("rtk-ai/rtk", script)
+        self.assertIn("update_rtk", script)
+        self.assertIn("ollama|rtk|all", script)
+
+    def test_windows_one_click_script_contains_rtk_target(self) -> None:
+        script_path = os.path.join(os.getcwd(), "install_all_windows.ps1")
+        with open(script_path, "r", encoding="utf-8") as f:
+            script = f.read()
+        self.assertIn("Install-Rtk", script)
+        self.assertIn("Ensure-RustToolchain", script)
+        self.assertIn("Rustlang.Rustup", script)
+        self.assertIn("--branch', 'master', '--force'", script)
+        self.assertIn("rtk-ai/rtk", script)
+        self.assertIn("Update-Rtk", script)
+        # Hook command normalization for Git Bash.
+        self.assertIn("/c/Users/", script)
+        self.assertIn("/.cargo/bin/rtk.exe hook claude", script)
+
+    def test_windows_gui_auto_update_script_rebuilds_rtk(self) -> None:
+        script = m.build_cli_auto_update_script(r"C:\Program Files\nodejs\npm.cmd", r"C:\packages.txt")
+        self.assertIn("function Update-Rtk", script)
+        self.assertIn("Update-Rtk", script)
+        self.assertIn("rtk-ai/rtk", script)
+        self.assertIn("--branch master --force", script)
+        # Cargo git cache clearing.
+        self.assertIn("rtk-*", script)
+        # Hook normalization in settings.json.
+        self.assertIn(".claude\\settings.json", script)
+
+    def test_macos_gui_auto_update_script_rebuilds_rtk(self) -> None:
+        script = m.build_macos_cli_auto_update_script()
+        self.assertIn("update_rtk", script)
+        self.assertIn("rtk-ai/rtk", script)
+        self.assertIn("--branch master --force", script)
+        self.assertIn("rtk-*", script)
+
+    def test_readme_lists_rtk_as_install_target(self) -> None:
+        with open(os.path.join(os.getcwd(), "README.md"), "r", encoding="utf-8") as f:
+            readme = f.read()
+        self.assertIn("RTK (Rust Token Killer", readme)
+        self.assertIn("rtk-ai/rtk", readme)
+        # Sanity check list should include rtk.
+        self.assertIn("\nrtk\n", readme)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main(verbosity=2)

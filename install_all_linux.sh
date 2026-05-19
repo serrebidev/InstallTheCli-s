@@ -60,6 +60,7 @@ This script installs:
     OpenClaw CLI, IronClaw CLI (npm)
   - Mistral Vibe CLI (Python 3.12+ + pip/uv)
   - Ollama (official install script)
+  - RTK (Rust Token Killer) from git master via cargo (opt-in: 'install rtk')
   - Cron updater (@reboot and daily) unless --no-cron is used
 EOF
 }
@@ -77,12 +78,14 @@ Supported targets:
   ironclaw
   mistral
   ollama
+  rtk
   all
 
 Examples:
   ./install_all_linux.sh install codex
   ./install_all_linux.sh install openclaw
   ./install_all_linux.sh install mistral --no-cron
+  ./install_all_linux.sh install rtk
   ./install_all_linux.sh install-all --cron-time "15 2 * * *"
   ./install_all_linux.sh setup-cron
 EOF
@@ -369,6 +372,75 @@ install_ollama_official() {
   fi
 }
 
+# Install rustup + cargo if missing. Uses the official rustup-init script with
+# --default-toolchain stable --profile minimal so we get just enough Rust to
+# `cargo install` rtk.
+ensure_rust_toolchain() {
+  local cargo_bin="/root/.cargo/bin"
+  if [[ -x "$cargo_bin/cargo" ]]; then
+    log "cargo already available: $cargo_bin/cargo"
+    export PATH="$cargo_bin:$PATH"
+    return 0
+  fi
+  if ! command_exists curl; then
+    install_linux_packages curl
+  fi
+  log "Installing Rust toolchain via rustup (minimal profile, stable)"
+  if (( DRY_RUN )); then
+    log "[dry-run] curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path"
+  else
+    /bin/sh -lc "curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path"
+  fi
+  export PATH="$cargo_bin:$PATH"
+  if (( ! DRY_RUN )) && ! command_exists cargo; then
+    die "cargo not found after rustup install. Open a new shell and rerun."
+  fi
+}
+
+# Install rtk-ai/rtk from git master via `cargo install`. The cargo git
+# checkout cache is cleared first so we always pick up new commits on master;
+# without this, cargo silently rebuilds the same old SHA when only the
+# branch ref has moved (the rtk repo was bitten by this at 0.34.3 -> 0.40.0).
+install_rtk() {
+  ensure_rust_toolchain
+  local cargo_bin="/root/.cargo/bin"
+  local rtk_bin="$cargo_bin/rtk"
+  local cargo_exe="$cargo_bin/cargo"
+
+  for d in /root/.cargo/git/checkouts/rtk-* /root/.cargo/git/db/rtk-*; do
+    if [[ -d "$d" ]]; then
+      log "Clearing cargo git cache: $d"
+      run_cmd rm -rf "$d"
+    fi
+  done
+
+  log "Installing rtk from https://github.com/rtk-ai/rtk (branch master) via cargo"
+  run_cmd "$cargo_exe" install --git https://github.com/rtk-ai/rtk --branch master --force
+
+  # Surface rtk on PATH for any login shell. /root/.local/bin is already
+  # added to PATH by /root/.profile on Debian-family root accounts, but the
+  # cargo bin dir is not, so a symlink there is the simplest fix.
+  if (( ! DRY_RUN )); then
+    mkdir -p /root/.local/bin
+    ln -sfn "$rtk_bin" /root/.local/bin/rtk
+    log "Linked /root/.local/bin/rtk -> $rtk_bin"
+  fi
+
+  # Wire rtk into Claude Code and Codex if those CLIs are installed. These
+  # init commands are idempotent.
+  if (( ! DRY_RUN )) && [[ -x "$rtk_bin" ]]; then
+    if command_exists claude; then
+      log "Registering rtk hook for Claude Code"
+      "$rtk_bin" init -g --auto-patch || warn "rtk init (Claude) failed"
+    fi
+    if command_exists codex; then
+      log "Registering rtk for Codex CLI"
+      "$rtk_bin" init -g --codex || warn "rtk init (Codex) failed"
+    fi
+    log "Installed rtk: $("$rtk_bin" --version 2>&1)"
+  fi
+}
+
 install_all_targets() {
   install_all_npm_clis
   install_mistral_vibe
@@ -386,6 +458,9 @@ install_single_target() {
       ;;
     ollama)
       install_ollama_official
+      ;;
+    rtk)
+      install_rtk
       ;;
     claude|codex|gemini|grok|qwen|copilot|openclaw|ironclaw)
       install_npm_target "$target_key"
@@ -510,10 +585,37 @@ update_ollama() {
   run_shell "curl -fsSL ${OLLAMA_INSTALL_URL} | sh" || true
 }
 
+# Rebuild rtk from latest git master if it's already installed. Mirrors the
+# install path: bust the cargo git checkout cache for the rtk repo so cargo
+# actually picks up new commits (the --force flag alone doesn't refetch a
+# cached checkout if only the ref moved), then rebuild from --branch master.
+# Refresh the /root/.local/bin/rtk symlink so it points at the new binary,
+# and re-run rtk init so any new hook capabilities or RTK.md content land.
+update_rtk() {
+  local cargo_bin="/root/.cargo/bin"
+  local rtk_bin="$cargo_bin/rtk"
+  if [[ ! -x "$cargo_bin/cargo" ]] || [[ ! -x "$rtk_bin" ]]; then
+    log "rtk not installed; skipping rtk update"
+    return 0
+  fi
+  for d in /root/.cargo/git/checkouts/rtk-* /root/.cargo/git/db/rtk-*; do
+    [[ -d "$d" ]] && rm -rf "$d"
+  done
+  if ! run_cmd "$cargo_bin/cargo" install --git https://github.com/rtk-ai/rtk --branch master --force; then
+    log "rtk cargo install failed; keeping previous binary"
+    return 0
+  fi
+  ln -sfn "$rtk_bin" /root/.local/bin/rtk 2>/dev/null || true
+  command_exists claude && "$rtk_bin" init -g --auto-patch >/dev/null 2>&1 || true
+  command_exists codex && "$rtk_bin" init -g --codex >/dev/null 2>&1 || true
+  log "Updated rtk to $("$rtk_bin" --version 2>&1)"
+}
+
 main() {
   update_npm_all
   update_mistral_vibe
   update_ollama
+  update_rtk
 }
 
 main "$@"
@@ -630,7 +732,7 @@ parse_args() {
     help)
       SUBCOMMAND="help"
       ;;
-    claude|codex|gemini|grok|qwen|copilot|openclaw|ironclaw|mistral|mistral-vibe|vibe|ollama|all)
+    claude|codex|gemini|grok|qwen|copilot|openclaw|ironclaw|mistral|mistral-vibe|vibe|ollama|rtk|all)
       # Convenience alias: treat first positional target as "install <target>"
       SUBCOMMAND="install"
       TARGET="${positional[0],,}"
