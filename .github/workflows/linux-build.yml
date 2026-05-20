@@ -1,0 +1,132 @@
+name: Linux Build
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  linux-build:
+    name: Build & test (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install GTK runtime deps for wxPython
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-0 libgtk-3-dev libsdl2-2.0-0 \
+            libnotify4 libsm6 libxtst6 \
+            libgl1 libegl1 libglib2.0-0 \
+            shellcheck
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      - name: Install Python dependencies
+        # wxPython publishes Linux wheels on its own index per-distro; fall
+        # back to source build if a matching wheel is unavailable.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            -f https://extras.wxpython.org/wxPython4/extras/linux/gtk3/ubuntu-22.04 \
+            -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Lint install_all_linux.sh
+        run: |
+          bash -n install_all_linux.sh
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck -S warning install_all_linux.sh || true
+          fi
+
+      - name: Validate Linux one-click script CLI surface
+        run: |
+          chmod +x install_all_linux.sh
+          ./install_all_linux.sh help
+          ./install_all_linux.sh list
+          ./install_all_linux.sh install codex --dry-run --no-cron
+
+      - name: Run Linux-relevant unit tests
+        # The full unittest suite is Windows-coupled (winreg, ctypes.windll,
+        # ntpath semantics, hardcoded \\-paths) and is exercised on the
+        # Windows build/CI. Here we run only the tests that target Linux
+        # behaviour and the platform-detection helpers.
+        run: |
+          python - <<'PY'
+          import sys, unittest
+          KEYWORDS = ("linux", "cron", "systemd", "apt", "deb",
+                      "is_macos", "is_linux", "is_windows")
+          loader = unittest.TestLoader()
+          suite = loader.loadTestsFromName("test_ai_cli_installer_gui")
+          def flatten(s):
+              for t in s:
+                  if isinstance(t, unittest.TestSuite):
+                      yield from flatten(t)
+                  else:
+                      yield t
+          selected = [t for t in flatten(suite)
+                      if any(k in t.id().lower() for k in KEYWORDS)]
+          print(f"Running {len(selected)} Linux-relevant tests")
+          runner = unittest.TextTestRunner(verbosity=2)
+          result = runner.run(unittest.TestSuite(selected))
+          sys.exit(0 if result.wasSuccessful() else 1)
+          PY
+
+      - name: Build Linux binary with PyInstaller
+        run: |
+          python -m PyInstaller --clean --noconfirm --log-level ERROR InstallTheCli.spec
+
+      - name: Package Linux artifact
+        id: package
+        run: |
+          set -euo pipefail
+          cd dist
+          if [ ! -f InstallTheCli ]; then
+            echo "ERROR: PyInstaller did not produce dist/InstallTheCli." >&2
+            ls -la
+            exit 1
+          fi
+          chmod +x InstallTheCli
+          ARTIFACT="InstallTheCli-linux.tar.gz"
+          tar -czf "$ARTIFACT" InstallTheCli
+          sha256sum "$ARTIFACT" > "${ARTIFACT%.tar.gz}-SHA256SUMS.txt"
+          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Linux build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: InstallTheCli-linux
+          path: |
+            dist/${{ steps.package.outputs.artifact }}
+            dist/InstallTheCli-linux-SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Attach Linux artifact to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          RELEASE_TGZ="dist/InstallTheCli-${TAG}-linux.tar.gz"
+          RELEASE_SUMS="dist/InstallTheCli-${TAG}-linux-SHA256SUMS.txt"
+          mv "dist/${{ steps.package.outputs.artifact }}" "$RELEASE_TGZ"
+          sha256sum "$RELEASE_TGZ" > "$RELEASE_SUMS"
+          gh release upload "$TAG" "$RELEASE_TGZ" "$RELEASE_SUMS" --clobber

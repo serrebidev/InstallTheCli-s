@@ -1,0 +1,106 @@
+name: Windows Build
+
+# Mirrors the macOS CI pattern but intentionally OMITS the tag-triggered
+# release-attach step: official Windows releases are produced by build.bat
+# on the maintainer's local machine (per BUILD.md) and `build.bat release`
+# already uploads the Windows .exe/.zip to the GitHub release. Having CI
+# auto-attach a second Windows zip on the same tag would clobber that.
+# This workflow exists for one-off CI builds (workflow_dispatch / push to
+# master / PR validation) and never touches releases.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  windows-build:
+    name: Build & test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Validate install_all_windows.ps1 parses
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path .\install_all_windows.ps1).Path, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors -and $errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host $_.Message }
+            exit 1
+          }
+          Write-Host "PowerShell script parsed cleanly."
+
+      - name: Validate Windows one-click script CLI surface
+        shell: pwsh
+        run: |
+          .\install_all_windows.ps1 -Help
+          .\install_all_windows.ps1 list
+          .\install_all_windows.ps1 install codex -DryRun -NoAutoUpdate
+
+      - name: Run full unit test suite
+        # Per the macOS workflow's note, the full unittest suite is
+        # Windows-coupled (winreg, ctypes.windll, ntpath semantics,
+        # hardcoded \-paths). Run it all here in its native environment.
+        shell: pwsh
+        run: |
+          python -m unittest test_ai_cli_installer_gui -v
+
+      - name: Build Windows binary with PyInstaller
+        shell: pwsh
+        run: |
+          python -m PyInstaller --clean --noconfirm --log-level ERROR InstallTheCli.spec
+
+      - name: Package Windows artifact
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location dist
+          if (-not (Test-Path InstallTheCli.exe)) {
+            Write-Host "ERROR: PyInstaller did not produce dist/InstallTheCli.exe."
+            Get-ChildItem
+            exit 1
+          }
+          $artifact = 'InstallTheCli-windows.zip'
+          Compress-Archive -Path 'InstallTheCli.exe' -DestinationPath $artifact -Force
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $artifact).Hash.ToLowerInvariant()
+          $sumsName = 'InstallTheCli-windows-SHA256SUMS.txt'
+          "$hash  $artifact" | Set-Content -LiteralPath $sumsName -Encoding ascii
+          "artifact=$artifact" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+          Pop-Location
+
+      - name: Upload Windows build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: InstallTheCli-windows
+          path: |
+            dist/${{ steps.package.outputs.artifact }}
+            dist/InstallTheCli-windows-SHA256SUMS.txt
+          if-no-files-found: error
