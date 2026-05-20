@@ -177,10 +177,15 @@ GitHub release expectations:
 - Release from `master`; `master` is the expected default branch.
 - Publish real releases, not draft releases. Never leave GitHub releases in draft state unless the user explicitly reverses this project preference.
 - Use `build.bat release` for official releases; it publishes the release as Latest/non-draft and verifies the final state via `gh release view`. It does NOT delete other draft releases -- prior drafts must be cleaned up manually if you want them gone.
+- `build.bat release` only builds and attaches the **Windows** assets, then tags/pushes. The Linux and macOS artifacts are added afterward by the `linux-build.yml` / `macos-build.yml` GitHub Actions workflows, which trigger on the pushed tag and `gh release upload --clobber` their platform builds onto the release.
+  - Do NOT block waiting for those CI builds. Once `build.bat release` has run for a minute or so and is clearly progressing (EXE built, tag pushed, release created) and nothing in the build pipeline was changed, assume the macOS/Linux uploads will complete on their own. Don't poll CI to confirm.
+- A release can be cut from any machine: e.g. the maintainer may run the equivalent flow from Linux. If a target version's tag already exists remotely, `build.bat release` on another machine will refuse to re-tag -- bump to the next version rather than fighting the existing tag.
 - Release assets should include:
   - `InstallTheCli-vX.Y.Z.exe`
   - `InstallTheCli-vX.Y.Z.zip`
   - `InstallTheCli-vX.Y.Z-SHA256SUMS.txt`
+  - `InstallTheCli-vX.Y.Z-linux.tar.gz` (added by Linux CI)
+  - `InstallTheCli-vX.Y.Z-macos.zip` (added by macOS CI)
   - `install_all_windows.ps1`
   - `install_all_macos.sh`
   - `install_all_linux.sh`
