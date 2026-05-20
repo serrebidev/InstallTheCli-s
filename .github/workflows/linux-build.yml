@@ -24,30 +24,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install GTK runtime deps for wxPython
+      - name: Install Python + wxPython from apt
+        # wxPython's PyPI wheels lag Ubuntu LTS / Python releases badly
+        # (no wheel for Python 3.13 or 3.14 on ubuntu-24.04 as of 2026-05),
+        # so pip falls back to a 20-30 min C++ source build. apt's
+        # python3-wxgtk4.0 is the OS-packaged wxPython for the system
+        # Python and installs in seconds. We use a venv with
+        # --system-site-packages so PyInstaller (pip-installed) can see
+        # the apt-installed wxPython. macOS keeps actions/setup-python.
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libgtk-3-0 libgtk-3-dev libsdl2-2.0-0 \
-            libnotify4 libsm6 libxtst6 \
+            python3 python3-venv python3-pip \
+            python3-wxgtk4.0 \
+            libgtk-3-0 libsdl2-2.0-0 libnotify4 libsm6 libxtst6 \
             libgl1 libegl1 libglib2.0-0 \
             shellcheck
+          python3 -m venv --system-site-packages "$HOME/venv"
+          "$HOME/venv/bin/pip" install --upgrade pip
+          "$HOME/venv/bin/pip" install pyinstaller
+          echo "$HOME/venv/bin" >> "$GITHUB_PATH"
 
-      - name: Set up Python 3.13
-        # Pinned to 3.13 because wxPython 4.2 publishes manylinux wheels for
-        # 3.13 but not 3.14 yet. Using 3.14 forces a 20-30 min source build
-        # on every push; 3.13 wheels install in seconds. macOS workflow can
-        # stay on 3.14 because wxPython does ship macOS wheels for it.
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-          cache: pip
-
-      - name: Install Python dependencies
+      - name: Verify Python + wxPython
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install pyinstaller
+          python --version
+          python -c "import wx; print('wxPython', wx.version())"
+          pyinstaller --version
 
       - name: Lint install_all_linux.sh
         run: |
