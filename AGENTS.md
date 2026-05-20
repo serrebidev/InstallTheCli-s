@@ -136,6 +136,7 @@ Always fix any warnings, bugs, or errors that appear during a build before shipp
   - Claude locked-file skip + `claude.exe.old.<ts>` recovery in the Windows updater
   - Windows Scheduled Task registration warning handling
   - Linux distro detection / package manager branching
+  - Windows rtk Claude hook: `Install-RtkBashShim` drops an `rtk` shim into Git's `usr\bin` so the bare `rtk hook claude` command resolves from Claude Code's Git-Bash hook shell (minimal PATH, no cargo dir) AND is recognized by rtk's hook-detector (avoids the "No hook installed" nag). If the shim can't be written, fall back to the absolute POSIX path `/c/Users/<leaf>/.cargo/bin/rtk.exe hook claude` (works, but nags). This logic is mirrored in `install_all_windows.ps1` (installer + embedded updater) and `ai_cli_installer_gui.py` (`_install_rtk_bash_shim` / `_normalize_claude_rtk_hook` + the embedded updater string) — keep them in sync. Not needed on Linux/macOS, where Claude Code uses a profile-PATH bash.
 
 ## User-Facing Scripts (Command UX)
 

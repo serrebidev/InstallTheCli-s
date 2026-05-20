@@ -4092,6 +4092,70 @@ class RtkIntegrationTests(unittest.TestCase):
                 # Non-rtk repo cache should be untouched.
                 self.assertTrue(os.path.isdir(os.path.join(checkouts, "other-xyz")))
 
+    def test_install_rtk_bash_shim_writes_lf_shim_in_git_usr_bin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            # git.exe in <root>\mingw64\bin; bash.exe in <root>\usr\bin. The
+            # resolver must walk up past mingw64 to find the real usr\bin.
+            git_dir = os.path.join(tmp, "mingw64", "bin")
+            usr_bin = os.path.join(tmp, "usr", "bin")
+            os.makedirs(git_dir)
+            os.makedirs(usr_bin)
+            git_exe = os.path.join(git_dir, "git.exe")
+            open(git_exe, "w").close()
+            open(os.path.join(usr_bin, "bash.exe"), "w").close()
+            posix = "/c/Users/admin/.cargo/bin/rtk.exe"
+            with patch.object(m.shutil, "which", return_value=git_exe):
+                ok = m._install_rtk_bash_shim(posix, lambda _msg: None)
+            self.assertTrue(ok)
+            shim_path = os.path.join(usr_bin, "rtk")
+            with open(shim_path, "r", encoding="utf-8", newline="") as fh:
+                content = fh.read()
+            self.assertEqual(content, '#!/usr/bin/bash\nexec /c/Users/admin/.cargo/bin/rtk.exe "$@"\n')
+            self.assertNotIn("\r", content, "shim must be LF-only for Git Bash")
+
+    def test_install_rtk_bash_shim_returns_false_without_git(self) -> None:
+        with patch.object(m.shutil, "which", return_value=None):
+            self.assertFalse(m._install_rtk_bash_shim("/c/x/rtk.exe", lambda _msg: None))
+
+    def test_normalize_claude_hook_uses_bare_form_when_shim_installed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            claude_dir = os.path.join(tmp, ".claude")
+            os.makedirs(claude_dir)
+            settings_path = os.path.join(claude_dir, "settings.json")
+            with open(settings_path, "w", encoding="utf-8") as fh:
+                json.dump({"hooks": {"PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "/c/Users/testuser/.cargo/bin/rtk.exe hook claude"}]},
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "rtk hook claude"}]},
+                ]}}, fh)
+            with (
+                patch.object(m.os.path, "expanduser", return_value=tmp),
+                patch.object(m, "_install_rtk_bash_shim", return_value=True),
+            ):
+                m._normalize_claude_rtk_hook(lambda _msg: None)
+            with open(settings_path, "r", encoding="utf-8") as fh:
+                hooks = json.load(fh)["hooks"]["PreToolUse"]
+            self.assertEqual(len(hooks), 1, "duplicate Bash matchers should be deduped")
+            self.assertEqual(hooks[0]["hooks"][0]["command"], "rtk hook claude")
+
+    def test_normalize_claude_hook_falls_back_to_absolute_without_shim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            claude_dir = os.path.join(tmp, ".claude")
+            os.makedirs(claude_dir)
+            settings_path = os.path.join(claude_dir, "settings.json")
+            with open(settings_path, "w", encoding="utf-8") as fh:
+                json.dump({"hooks": {"PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "rtk hook claude"}]},
+                ]}}, fh)
+            with (
+                patch.object(m.os.path, "expanduser", return_value=tmp),
+                patch.dict(m.os.environ, {"USERPROFILE": r"C:\Users\testuser"}),
+                patch.object(m, "_install_rtk_bash_shim", return_value=False),
+            ):
+                m._normalize_claude_rtk_hook(lambda _msg: None)
+            with open(settings_path, "r", encoding="utf-8") as fh:
+                hooks = json.load(fh)["hooks"]["PreToolUse"]
+            self.assertEqual(hooks[0]["hooks"][0]["command"], "/c/Users/testuser/.cargo/bin/rtk.exe hook claude")
+
     def test_linux_one_click_script_contains_rtk_target(self) -> None:
         script_path = os.path.join(os.getcwd(), "install_all_linux.sh")
         with open(script_path, "r", encoding="utf-8") as f:
@@ -4140,9 +4204,12 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn("hook gemini", script)
         self.assertIn("--copilot", script)
         self.assertIn("'--agent', $agent", script)
-        # Hook command normalization for Git Bash.
+        # Hook command: bare form via Git-Bash shim, absolute-path fallback.
+        self.assertIn("Install-RtkBashShim", script)
+        self.assertIn("'rtk hook claude'", script)
         self.assertIn("/c/Users/", script)
-        self.assertIn("/.cargo/bin/rtk.exe hook claude", script)
+        self.assertIn("/.cargo/bin/rtk.exe", script)
+        self.assertIn("$rtkPosix hook claude", script)
 
     def test_windows_gui_auto_update_script_rebuilds_rtk(self) -> None:
         script = m.build_cli_auto_update_script(r"C:\Program Files\nodejs\npm.cmd", r"C:\packages.txt")
@@ -4152,8 +4219,10 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn("--branch master --force", script)
         # Cargo git cache clearing.
         self.assertIn("rtk-*", script)
-        # Hook normalization in settings.json.
+        # Hook normalization in settings.json: shim + bare form.
         self.assertIn(".claude\\settings.json", script)
+        self.assertIn("Install-RtkBashShim", script)
+        self.assertIn("'rtk hook claude'", script)
         self.assertIn("Ensure-GeminiRtkConfig", script)
         self.assertIn("hook gemini", script)
         self.assertIn("--copilot", script)

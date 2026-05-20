@@ -882,14 +882,38 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "  param([string]$RtkExe, [string[]]$CommandNames, [string[]]$InitArgs)",
         "  if (Test-AnyCmd $CommandNames) { & $RtkExe init -g @InitArgs *>&1 | Out-Null }",
         "}",
+        # Drop a tiny `rtk` shim into Git's usr\bin so the bare `rtk hook claude`
+        # form resolves from Claude Code's Git-Bash hook shell (minimal PATH, no
+        # cargo dir). The bare form is also the only one rtk's hook-detector
+        # recognizes, so this avoids the "No hook installed" nag.
+        "function Install-RtkBashShim {",
+        "  param([string]$RtkPosix)",
+        "  try {",
+        "    $gitCmd = Get-Command git.exe -ErrorAction Stop",
+        "    $dir = Split-Path -Parent $gitCmd.Source",
+        "    $usrBin = $null",
+        "    for ($i = 0; $i -lt 5 -and $dir; $i++) {",
+        "      $candidate = Join-Path $dir 'usr\\bin'",
+        "      if (Test-Path -LiteralPath (Join-Path $candidate 'bash.exe')) { $usrBin = $candidate; break }",
+        "      $dir = Split-Path -Parent $dir",
+        "    }",
+        "    if (-not $usrBin) { return $false }",
+        "    $shimPath = Join-Path $usrBin 'rtk'",
+        "    $lf = [char]0x0A; $q = [char]0x22",
+        "    $shimBody = '#!/usr/bin/bash' + $lf + 'exec ' + $RtkPosix + ' ' + $q + '$@' + $q + $lf",
+        "    $existing = if (Test-Path -LiteralPath $shimPath) { [System.IO.File]::ReadAllText($shimPath) } else { $null }",
+        "    if ($existing -ne $shimBody) { [System.IO.File]::WriteAllText($shimPath, $shimBody, (New-Object System.Text.UTF8Encoding($false))) }",
+        "    return (Test-Path -LiteralPath $shimPath)",
+        "  } catch { return $false }",
+        "}",
         # Rebuild rtk from latest git master if it's already installed. Bust
         # the cargo git checkout cache for the rtk repo first; without this,
         # `cargo install --git --force` silently reuses a stale checkout and
         # rebuilds the same old SHA when only the master ref has moved. Then
         # rebuild from --branch master. Re-run rtk init for Claude/Codex and
-        # normalize the Claude Code hook command to the POSIX absolute path
-        # Git Bash can resolve (rtk init registers it as bare `rtk`, which
-        # fails because Claude Code runs PreToolUse hooks via Git Bash).
+        # pin the Claude Code hook command to the bare `rtk hook claude` form
+        # (backed by the Git-Bash shim above, no detector nag), falling back to
+        # the absolute POSIX path if the shim can't be installed.
         "function Update-Rtk {",
         "  $cargoBin = Join-Path $env:USERPROFILE '.cargo\\bin'",
         "  $cargoExe = Join-Path $cargoBin 'cargo.exe'",
@@ -922,7 +946,8 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "      $s = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json",
         "      if ($s.hooks -and $s.hooks.PreToolUse) {",
         "        $userLeaf = Split-Path -Leaf $env:USERPROFILE",
-        "        $want = \"/c/Users/$userLeaf/.cargo/bin/rtk.exe hook claude\"",
+        "        $rtkPosix = \"/c/Users/$userLeaf/.cargo/bin/rtk.exe\"",
+        "        $want = if (Install-RtkBashShim -RtkPosix $rtkPosix) { 'rtk hook claude' } else { \"$rtkPosix hook claude\" }",
         "        $changed = $false",
         "        $seen = @{}",
         "        $kept = @()",
@@ -2847,13 +2872,56 @@ def try_install_rtk(
     return (True, spec.package_candidates[0] if spec.package_candidates else "rtk")
 
 
+def _install_rtk_bash_shim(rtk_posix: str, log: Callable[[str], None]) -> bool:
+    """Drop a tiny `rtk` shim into Git's usr\\bin so the bare `rtk hook claude`
+    form resolves from Claude Code's Git-Bash hook shell (minimal PATH, no cargo
+    dir). The bare form is also the only one rtk's hook-detector recognizes, so
+    this avoids the "No hook installed" nag printed on every proxied command.
+    Returns True if the shim is in place. git.exe may live in <Git>\\cmd,
+    <Git>\\bin, or <Git>\\mingw64\\bin, so we walk up to the install root whose
+    usr\\bin holds bash.exe -- that usr\\bin is exactly Git Bash's /usr/bin."""
+    git_exe = shutil.which("git")
+    if not git_exe:
+        return False
+    directory = os.path.dirname(git_exe)
+    usr_bin = None
+    for _ in range(5):
+        if not directory:
+            break
+        candidate = os.path.join(directory, "usr", "bin")
+        if os.path.isfile(os.path.join(candidate, "bash.exe")):
+            usr_bin = candidate
+            break
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    if not usr_bin:
+        return False
+    shim_path = os.path.join(usr_bin, "rtk")
+    # LF-only bash script (newline="" keeps Windows from writing CRLF).
+    shim_body = f'#!/usr/bin/bash\nexec {rtk_posix} "$@"\n'
+    try:
+        existing = None
+        if os.path.isfile(shim_path):
+            with open(shim_path, "r", encoding="utf-8", newline="") as fh:
+                existing = fh.read()
+        if existing != shim_body:
+            with open(shim_path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(shim_body)
+            log(f"Installed rtk Git-Bash shim at {shim_path}")
+        return os.path.isfile(shim_path)
+    except OSError as exc:
+        log(f"Warning: could not install rtk Git-Bash shim: {exc}")
+        return False
+
+
 def _normalize_claude_rtk_hook(log: Callable[[str], None]) -> None:
-    """Rewrite the Claude Code PreToolUse Bash hook command to use the
-    POSIX-style absolute path Git Bash can resolve. `rtk init --auto-patch`
-    registers it as bare `rtk hook claude`, which works from PowerShell/cmd
-    (Windows PATH has the cargo bin dir) but fails from Git Bash because
-    Git Bash does not inherit Windows PATH. Also dedupes duplicate
-    Bash-matcher blocks left behind by repeated init runs."""
+    """Pin the Claude Code PreToolUse Bash hook command to the bare
+    `rtk hook claude` form when a Git-Bash-resolvable rtk shim can be installed
+    (no detector nag), else the POSIX-style absolute path. `rtk init
+    --auto-patch` registers the bare form and appends a duplicate Bash matcher
+    each run, so we also dedupe Bash-matcher blocks left behind."""
     settings_path = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
     if not os.path.isfile(settings_path):
         return
@@ -2867,7 +2935,11 @@ def _normalize_claude_rtk_hook(log: Callable[[str], None]) -> None:
     if not hooks:
         return
     user_leaf = os.path.basename(os.environ.get("USERPROFILE", os.path.expanduser("~")))
-    want = f"/c/Users/{user_leaf}/.cargo/bin/rtk.exe hook claude"
+    rtk_posix = f"/c/Users/{user_leaf}/.cargo/bin/rtk.exe"
+    if _install_rtk_bash_shim(rtk_posix, log):
+        want = "rtk hook claude"
+    else:
+        want = f"{rtk_posix} hook claude"
     rtk_pattern = re.compile(r"rtk(\.exe)?\s+hook\s+claude")
     changed = False
     seen: dict[str, bool] = {}

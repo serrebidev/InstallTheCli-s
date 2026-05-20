@@ -356,12 +356,44 @@ function Install-Rtk {
 }
 
 # Claude Code on Windows runs PreToolUse hooks through Git Bash (/usr/bin/bash),
-# whose PATH does NOT include the cargo bin dir. The bare `rtk hook claude`
-# command that `rtk init --auto-patch` registers therefore fails with
-# "command not found" from Git Bash. Rewrite the hook command in
-# ~/.claude/settings.json to use the POSIX-style absolute path Git Bash
-# can resolve, and dedupe any duplicate Bash-matcher blocks that repeated
-# init runs leave behind.
+# whose minimal PATH does NOT include the cargo bin dir, so a bare `rtk` can't
+# resolve there. rtk's own hook-detector, however, only recognizes the bare
+# `rtk hook claude` string -- an absolute-path hook works but makes rtk print a
+# "No hook installed" nag on every proxied command. We drop a tiny `rtk` shim
+# into Git's usr\bin (which IS on that minimal PATH) so we can use the bare
+# form (no nag); if the shim can't be written we fall back to the absolute
+# POSIX path (works, but nags).
+function Install-RtkBashShim {
+    param([Parameter(Mandatory = $true)][string]$RtkPosix)
+    try {
+        # git.exe may live in <Git>\cmd, <Git>\bin, or <Git>\mingw64\bin, so
+        # walk up until we find the install root whose usr\bin holds bash.exe
+        # -- that usr\bin is exactly what Git Bash exposes as /usr/bin.
+        $gitCmd = Get-Command git.exe -ErrorAction Stop
+        $dir = Split-Path -Parent $gitCmd.Source
+        $usrBin = $null
+        for ($i = 0; $i -lt 5 -and $dir; $i++) {
+            $candidate = Join-Path $dir 'usr\bin'
+            if (Test-Path -LiteralPath (Join-Path $candidate 'bash.exe')) { $usrBin = $candidate; break }
+            $dir = Split-Path -Parent $dir
+        }
+        if (-not $usrBin) { return $false }
+        $shimPath = Join-Path $usrBin 'rtk'
+        $shimBody = "#!/usr/bin/bash`nexec $RtkPosix `"`$@`"`n"
+        $existing = if (Test-Path -LiteralPath $shimPath) { [System.IO.File]::ReadAllText($shimPath) } else { $null }
+        if ($existing -ne $shimBody) {
+            [System.IO.File]::WriteAllText($shimPath, $shimBody, (New-Object System.Text.UTF8Encoding($false)))
+        }
+        return (Test-Path -LiteralPath $shimPath)
+    } catch {
+        return $false
+    }
+}
+
+# Pin the Claude Code PreToolUse Bash hook command to the bare `rtk hook claude`
+# form when an rtk shim is resolvable from Git Bash (no detector nag), else the
+# absolute POSIX path. Also dedupes any duplicate Bash-matcher blocks repeated
+# `rtk init --auto-patch` runs leave behind.
 function Update-ClaudeRtkHookCommand {
     if ($DryRun) { return }
     $settingsPath = Join-Path $env:USERPROFILE '.claude\settings.json'
@@ -370,7 +402,7 @@ function Update-ClaudeRtkHookCommand {
         $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
         if (-not $settings.hooks -or -not $settings.hooks.PreToolUse) { return }
         $rtkPosix = '/c/Users/' + (Split-Path -Leaf $env:USERPROFILE) + '/.cargo/bin/rtk.exe'
-        $want = "$rtkPosix hook claude"
+        $want = if (Install-RtkBashShim -RtkPosix $rtkPosix) { 'rtk hook claude' } else { "$rtkPosix hook claude" }
         $changed = $false
         $seen = @{}
         $kept = @()
@@ -393,7 +425,7 @@ function Update-ClaudeRtkHookCommand {
         if ($changed) {
             $settings.hooks.PreToolUse = $kept
             ($settings | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $settingsPath -Encoding utf8
-            Write-Log 'Normalized Claude Code rtk hook to absolute Git-Bash path'
+            Write-Log "Pinned Claude Code rtk hook command to '$want'"
         }
     } catch {
         Write-WarnLog "Could not normalize Claude rtk hook: $($_.Exception.Message)"
@@ -1046,13 +1078,39 @@ function Invoke-RtkInitIfCommand {
   if (Test-AnyCmd $CommandNames) { & $RtkExe init -g @InitArgs *>&1 | Out-Null }
 }
 
+# Drop a tiny `rtk` shim into Git's usr\bin so the bare `rtk hook claude` form
+# resolves from Claude Code's Git-Bash hook shell (minimal PATH, no cargo dir).
+# The bare form is also the only one rtk's hook-detector recognizes, so this
+# avoids the "No hook installed" nag. Returns $true if the shim is in place.
+function Install-RtkBashShim {
+  param([string]$RtkPosix)
+  try {
+    $gitCmd = Get-Command git.exe -ErrorAction Stop
+    $dir = Split-Path -Parent $gitCmd.Source
+    $usrBin = $null
+    for ($i = 0; $i -lt 5 -and $dir; $i++) {
+      $candidate = Join-Path $dir 'usr\bin'
+      if (Test-Path -LiteralPath (Join-Path $candidate 'bash.exe')) { $usrBin = $candidate; break }
+      $dir = Split-Path -Parent $dir
+    }
+    if (-not $usrBin) { return $false }
+    $shimPath = Join-Path $usrBin 'rtk'
+    $shimBody = "#!/usr/bin/bash`nexec $RtkPosix `"`$@`"`n"
+    $existing = if (Test-Path -LiteralPath $shimPath) { [System.IO.File]::ReadAllText($shimPath) } else { $null }
+    if ($existing -ne $shimBody) {
+      [System.IO.File]::WriteAllText($shimPath, $shimBody, (New-Object System.Text.UTF8Encoding($false)))
+    }
+    return (Test-Path -LiteralPath $shimPath)
+  } catch { return $false }
+}
+
 # Rebuild rtk from latest git master if it's already installed. Mirrors the
 # install path: bust the cargo git checkout cache for the rtk repo (without
 # this, `cargo install --git --force` silently reuses a stale checkout and
 # rebuilds the same old SHA), then rebuild from --branch master. Refresh the
-# rtk hook in Claude's settings.json so it survives `rtk init --auto-patch`
-# re-registering the bare-name command (Claude Code runs PreToolUse hooks
-# through Git Bash, which can't resolve bare `rtk` without cargo on PATH).
+# rtk hook in Claude's settings.json: prefer the bare `rtk hook claude` form
+# (no detector nag) backed by the Git-Bash shim above, falling back to the
+# absolute POSIX path if the shim can't be installed.
 function Update-Rtk {
   $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
   $cargo = Join-Path $cargoBin 'cargo.exe'
@@ -1086,7 +1144,8 @@ function Update-Rtk {
       $s = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
       if ($s.hooks -and $s.hooks.PreToolUse) {
         $userLeaf = Split-Path -Leaf $env:USERPROFILE
-        $want = "/c/Users/$userLeaf/.cargo/bin/rtk.exe hook claude"
+        $rtkPosix = "/c/Users/$userLeaf/.cargo/bin/rtk.exe"
+        $want = if (Install-RtkBashShim -RtkPosix $rtkPosix) { 'rtk hook claude' } else { "$rtkPosix hook claude" }
         $changed = $false
         $seen = @{}
         $kept = @()
