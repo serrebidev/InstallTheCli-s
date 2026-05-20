@@ -615,7 +615,7 @@ update_script_content() {
 #!/usr/bin/env bash
 set -Eeuo pipefail
 IFS=$'\n\t'
-PATH="/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+PATH="/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 LOG_PREFIX="[installthecli-update]"
 OLLAMA_INSTALL_URL="https://ollama.com/install.sh"
 NPM_FLAGS=(--no-fund --no-audit --no-update-notifier --loglevel error)
