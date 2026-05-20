@@ -33,20 +33,20 @@ jobs:
             libgl1 libegl1 libglib2.0-0 \
             shellcheck
 
-      - name: Set up Python 3.14
+      - name: Set up Python 3.13
+        # Pinned to 3.13 because wxPython 4.2 publishes manylinux wheels for
+        # 3.13 but not 3.14 yet. Using 3.14 forces a 20-30 min source build
+        # on every push; 3.13 wheels install in seconds. macOS workflow can
+        # stay on 3.14 because wxPython does ship macOS wheels for it.
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: '3.13'
           cache: pip
 
       - name: Install Python dependencies
-        # wxPython publishes Linux wheels on its own index per-distro; fall
-        # back to source build if a matching wheel is unavailable.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install \
-            -f https://extras.wxpython.org/wxPython4/extras/linux/gtk3/ubuntu-22.04 \
-            -r requirements.txt
+          python -m pip install -r requirements.txt
           python -m pip install pyinstaller
 
       - name: Lint install_all_linux.sh

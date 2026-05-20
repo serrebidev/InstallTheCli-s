@@ -46,6 +46,7 @@ call "%~dp0build_exe.bat" || goto :error
 call :stage_assets || goto :error
 call :tag_and_push || goto :error
 call :publish_release || goto :error
+call :wait_for_linux_remote_build || goto :error
 
 echo [release] Published v%NEXT_VERSION%.
 popd
@@ -136,6 +137,61 @@ if errorlevel 1 (
     echo [release] Failed to confirm v%NEXT_VERSION% is published as Latest.
     exit /b 1
 )
+exit /b 0
+
+REM Wait for the Linux remote build (.github/workflows/linux-build.yml)
+REM to finish on the just-pushed tag, then confirm its artifact landed on
+REM the GitHub release. Windows/macOS binaries are produced elsewhere
+REM (this script for Windows, the macOS workflow auto-attaches macOS), so
+REM only Linux is gated here. The tag push in :tag_and_push is what fires
+REM the workflow; by the time we get here, it's mid-build.
+:wait_for_linux_remote_build
+echo [release] Waiting for Linux remote build on tag v%NEXT_VERSION%...
+set "LINUX_RUN_ID="
+set /a "FIND_ATTEMPT=0"
+:find_linux_run
+set /a "FIND_ATTEMPT=FIND_ATTEMPT+1"
+for /f "delims=" %%I in ('gh run list --repo "%GITHUB_REPO_SLUG%" --workflow=linux-build.yml --event=push --limit 20 --json databaseId^,headBranch --jq ".[] | select(.headBranch == \"v%NEXT_VERSION%\") | .databaseId" 2^>nul') do set "LINUX_RUN_ID=%%I"
+if not defined LINUX_RUN_ID (
+    if %FIND_ATTEMPT% lss 6 (
+        echo [release] Linux workflow run not visible yet ^(attempt %FIND_ATTEMPT%/6^), retrying in 10s...
+        powershell -NoProfile -Command "Start-Sleep -Seconds 10"
+        goto :find_linux_run
+    )
+    echo [release] WARNING: Could not locate Linux workflow run for v%NEXT_VERSION% after 60s.
+    echo [release] Check https://github.com/%GITHUB_REPO_SLUG%/actions/workflows/linux-build.yml manually.
+    exit /b 1
+)
+echo [release] Linux workflow run: https://github.com/%GITHUB_REPO_SLUG%/actions/runs/%LINUX_RUN_ID%
+set /a "POLL_COUNT=0"
+:poll_linux_run
+set "LINUX_STATUS="
+for /f "delims=" %%S in ('gh run view %LINUX_RUN_ID% --repo "%GITHUB_REPO_SLUG%" --json status --jq ".status" 2^>nul') do set "LINUX_STATUS=%%S"
+if /I "%LINUX_STATUS%"=="completed" goto :linux_run_done
+set /a "POLL_COUNT=POLL_COUNT+1"
+if %POLL_COUNT% gtr 60 (
+    echo [release] WARNING: Linux build still running after 30 minutes. Skipping gate.
+    echo [release] Check https://github.com/%GITHUB_REPO_SLUG%/actions/runs/%LINUX_RUN_ID%
+    exit /b 1
+)
+echo [release] Linux build status: %LINUX_STATUS% ^(poll %POLL_COUNT%/60^), waiting 30s...
+powershell -NoProfile -Command "Start-Sleep -Seconds 30"
+goto :poll_linux_run
+:linux_run_done
+set "LINUX_CONCLUSION="
+for /f "delims=" %%C in ('gh run view %LINUX_RUN_ID% --repo "%GITHUB_REPO_SLUG%" --json conclusion --jq ".conclusion" 2^>nul') do set "LINUX_CONCLUSION=%%C"
+if /I not "%LINUX_CONCLUSION%"=="success" (
+    echo [release] WARNING: Linux build did not succeed. Conclusion: %LINUX_CONCLUSION%
+    echo [release] URL: https://github.com/%GITHUB_REPO_SLUG%/actions/runs/%LINUX_RUN_ID%
+    exit /b 1
+)
+echo [release] Linux build succeeded. Verifying release asset...
+gh release view "v%NEXT_VERSION%" --repo "%GITHUB_REPO_SLUG%" --json assets --jq ".assets[].name" | findstr /I "linux" >nul
+if errorlevel 1 (
+    echo [release] WARNING: No Linux asset found on release v%NEXT_VERSION% (build succeeded but upload may have failed).
+    exit /b 1
+)
+echo [release] Linux artifact confirmed on release v%NEXT_VERSION%.
 exit /b 0
 
 :usage
