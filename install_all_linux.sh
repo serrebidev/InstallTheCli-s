@@ -15,7 +15,7 @@ CRON_FILE_PATH="/etc/cron.d/installthecli-ai-cli-updates"
 UPDATE_LOG_PATH="/var/log/installthecli-linux-update.log"
 
 NPM_FLAGS=(--no-fund --no-audit --no-update-notifier --loglevel error)
-PIP_FLAGS=(--disable-pip-version-check --no-input --quiet --break-system-packages)
+PIP_FLAGS=(--disable-pip-version-check --no-input --quiet --break-system-packages --root-user-action=ignore)
 
 DISTRO_FAMILY=""
 CRON_SERVICE_NAME=""
@@ -619,7 +619,7 @@ PATH="/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin
 LOG_PREFIX="[installthecli-update]"
 OLLAMA_INSTALL_URL="https://ollama.com/install.sh"
 NPM_FLAGS=(--no-fund --no-audit --no-update-notifier --loglevel error)
-PIP_FLAGS=(--disable-pip-version-check --no-input --quiet --break-system-packages)
+PIP_FLAGS=(--disable-pip-version-check --no-input --quiet --break-system-packages --root-user-action=ignore)
 
 log() {
   printf '%s %s\n' "${LOG_PREFIX}" "$*"
@@ -637,6 +637,10 @@ run_cmd() {
 run_shell() {
   log "+ $1"
   /bin/sh -lc "$1"
+}
+
+npm_package_installed() {
+  npm ls -g --depth=0 "$1" >/dev/null 2>&1
 }
 
 update_npm_cli() {
