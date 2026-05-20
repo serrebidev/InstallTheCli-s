@@ -75,6 +75,10 @@ jobs:
           import sys, unittest
           KEYWORDS = ("linux", "cron", "systemd", "apt", "deb",
                       "is_macos", "is_linux", "is_windows")
+          # Tests whose name matches a keyword (e.g. contains "linux") but
+          # that actually assert Windows-only behaviour and only pass on a
+          # Windows host. They are covered by the Windows CI; skip them here.
+          EXCLUDE = ("test_pip_install_flags_for_platform_linux_and_non_linux",)
           loader = unittest.TestLoader()
           suite = loader.loadTestsFromName("test_ai_cli_installer_gui")
           def flatten(s):
@@ -84,7 +88,8 @@ jobs:
                   else:
                       yield t
           selected = [t for t in flatten(suite)
-                      if any(k in t.id().lower() for k in KEYWORDS)]
+                      if any(k in t.id().lower() for k in KEYWORDS)
+                      and not any(x in t.id() for x in EXCLUDE)]
           print(f"Running {len(selected)} Linux-relevant tests")
           runner = unittest.TextTestRunner(verbosity=2)
           result = runner.run(unittest.TestSuite(selected))
