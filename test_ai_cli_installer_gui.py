@@ -3548,6 +3548,14 @@ class NodeInstallAndWorkflowTests(unittest.TestCase):
             log("FAKE: hidden auto-update task configured")
             return list(packages)
 
+        # The test hardcodes C:\Users\Admin paths, but the real
+        # filter_system_path_dirs filters via os.path.expanduser and
+        # %AppData% on the *runner*, which is C:\Users\runneradmin on CI.
+        # Patch the filter so it deterministically removes the test's
+        # user-scoped npm dir regardless of the runner identity.
+        def fake_filter_system_path_dirs(dirs):
+            return [d for d in dirs if "Roaming\\npm" not in d]
+
         with (
             patch.object(m, "is_admin", return_value=False),
             patch.object(m, "ensure_node_via_winget", side_effect=fake_ensure_node),
@@ -3555,6 +3563,7 @@ class NodeInstallAndWorkflowTests(unittest.TestCase):
             patch.object(m, "get_cli_bin_dirs", side_effect=fake_get_cli_bin_dirs),
             patch.object(m, "get_python_cli_bin_dirs", return_value=[]),
             patch.object(m, "add_dirs_to_path", side_effect=fake_add_dirs_to_path),
+            patch.object(m, "filter_system_path_dirs", side_effect=fake_filter_system_path_dirs),
             patch.object(m, "try_install_package_candidates", side_effect=fake_try_install),
             patch.object(m, "try_install_mistral_vibe", side_effect=fake_try_install_mistral),
             patch.object(m, "resolve_command_path", side_effect=fake_resolve),
