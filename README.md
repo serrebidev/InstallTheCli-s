@@ -12,7 +12,8 @@ It supports:
 By default it can install:
 - Claude CLI
 - Codex CLI
-- Gemini CLI
+- Antigravity (Google's agentic IDE + `antigravity` CLI; Windows winget, macOS Homebrew cask, Linux official tar.gz)
+- Visual Studio Code (`code` CLI; Windows winget, macOS Homebrew cask, Linux official .deb/.rpm/tar.gz)
 - Grok CLI (`@vibe-kit/grok-cli`)
 - Qwen CLI
 - GitHub Copilot CLI
@@ -146,8 +147,8 @@ Useful flags:
 - `--no-launch-agent`
 
 macOS install sources:
-- Homebrew casks: Claude Code, Codex CLI, GitHub Copilot CLI
-- Homebrew formulae: Gemini CLI, Qwen CLI, Mistral Vibe CLI, Ollama, IronClaw
+- Homebrew casks: Claude Code, Codex CLI, GitHub Copilot CLI, Antigravity, Visual Studio Code
+- Homebrew formulae: Qwen CLI, Mistral Vibe CLI, Ollama, IronClaw
 - npm via Homebrew Node.js where needed: Grok CLI
 - official installer: OpenClaw (checks Node.js 22.14+)
 
@@ -275,7 +276,8 @@ Open a new shell and run:
 ```text
 claude
 codex
-gemini
+antigravity
+code
 grok
 qwen
 copilot

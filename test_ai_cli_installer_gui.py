@@ -203,7 +203,12 @@ class UtilityFunctionTests(unittest.TestCase):
         by_key = {spec.key: spec for spec in m.CLI_SPECS}
         self.assertEqual(by_key["claude"].macos_brew_cask, "claude-code")
         self.assertEqual(by_key["codex"].macos_brew_cask, "codex")
-        self.assertEqual(by_key["gemini"].macos_brew_formula, "gemini-cli")
+        self.assertEqual(by_key["antigravity"].macos_brew_cask, "antigravity")
+        self.assertEqual(by_key["antigravity"].winget_id, "Google.Antigravity")
+        self.assertEqual(by_key["antigravity"].linux_install_kind, "antigravity_tarball")
+        self.assertEqual(by_key["vscode"].macos_brew_cask, "visual-studio-code")
+        self.assertEqual(by_key["vscode"].winget_id, "Microsoft.VisualStudioCode")
+        self.assertEqual(by_key["vscode"].linux_install_kind, "vscode_pkg")
         self.assertEqual(by_key["qwen"].macos_brew_formula, "qwen-code")
         self.assertEqual(by_key["copilot"].macos_brew_cask, "copilot-cli")
         self.assertEqual(by_key["openclaw"].macos_official_install_url, m.OPENCLAW_INSTALL_URL)
@@ -542,7 +547,8 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("Homebrew is required for macOS installs", script)
         self.assertIn("HOMEBREW_INSTALL_URL", script)
         self.assertIn("brew_install_cask codex", script)
-        self.assertIn("brew_install_formula gemini-cli", script)
+        self.assertIn("brew_install_cask antigravity", script)
+        self.assertIn("brew_install_cask visual-studio-code", script)
         self.assertIn("brew_install_formula qwen-code", script)
         self.assertIn("brew_install_formula mistral-vibe", script)
         self.assertIn("brew_install_formula ollama", script)
@@ -614,8 +620,10 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("Refresh-AutoUpdateTaskIfPresent", script)
         self.assertIn("one_click_update_windows.vbs", script)
         self.assertIn("New-ScheduledTaskAction -Execute 'wscript.exe'", script)
-        self.assertIn("bundle\\gemini.js", script)
-        self.assertIn("dist\\index.js", script)
+        # Antigravity + VS Code install/upgrade via winget; Gemini CLI removed.
+        self.assertIn("Google.Antigravity", script)
+        self.assertIn("Microsoft.VisualStudioCode", script)
+        self.assertNotIn("gemini", script.lower())
 
 
 class RegistryAndWindowsTests(unittest.TestCase):
@@ -1865,16 +1873,16 @@ class CommandAndDetectionTests(unittest.TestCase):
 
     def test_try_install_macos_cli_prefers_brew_or_npm_fallback(self) -> None:
         codex = next(spec for spec in m.CLI_SPECS if spec.key == "codex")
-        gemini = next(spec for spec in m.CLI_SPECS if spec.key == "gemini")
+        qwen = next(spec for spec in m.CLI_SPECS if spec.key == "qwen")
         grok = next(spec for spec in m.CLI_SPECS if spec.key == "grok")
 
         with patch.object(m, "brew_install_or_upgrade", return_value=(True, "codex")) as brew_mock:
             self.assertEqual(m.try_install_macos_cli(codex, lambda _msg: None), (True, "codex"))
         brew_mock.assert_called_once_with("codex", unittest.mock.ANY, cask=True)
 
-        with patch.object(m, "brew_install_or_upgrade", return_value=(True, "gemini-cli")) as brew_mock:
-            self.assertEqual(m.try_install_macos_cli(gemini, lambda _msg: None), (True, "gemini-cli"))
-        brew_mock.assert_called_once_with("gemini-cli", unittest.mock.ANY, cask=False)
+        with patch.object(m, "brew_install_or_upgrade", return_value=(True, "qwen-code")) as brew_mock:
+            self.assertEqual(m.try_install_macos_cli(qwen, lambda _msg: None), (True, "qwen-code"))
+        brew_mock.assert_called_once_with("qwen-code", unittest.mock.ANY, cask=False)
 
         with (
             patch.object(m, "ensure_node_via_brew") as node_mock,
@@ -2245,13 +2253,8 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
         # call must be a bare statement, not part of the foreach loop.
         eager_marker = "Repair-ClaudeAfterFailedUpdate\n$packagesFile ="
         self.assertIn(eager_marker, script)
-        # Gemini shim regen guarded on @google/gemini-cli being in the package set
-        self.assertIn("$packages -contains '@google/gemini-cli'", script)
-        self.assertIn("Set-Content -LiteralPath (Join-Path $npmBin 'gemini.cmd')", script)
-        self.assertIn("bundle\\gemini.js", script)
-        self.assertIn("dist\\index.js", script)
-        self.assertIn("GEMINI_ENTRY", script)
-        self.assertIn("gemini.ps1", script)
+        # The Gemini CLI (and its npm shim regen) was removed; ensure no fossils remain.
+        self.assertNotIn("gemini", script.lower())
 
     def test_build_cli_auto_update_vbs_runs_powershell_hidden(self) -> None:
         vbs = m.build_cli_auto_update_vbs(
@@ -2273,7 +2276,9 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
     def test_build_macos_cli_auto_update_script_updates_brew_and_npm_packages(self) -> None:
         script = m.build_macos_cli_auto_update_script()
         self.assertIn("brew_bin=\"$(find_brew || true)\"", script)
-        self.assertIn("update_brew_package formula gemini-cli", script)
+        self.assertIn("update_brew_package cask antigravity", script)
+        self.assertIn("update_brew_package cask visual-studio-code", script)
+        self.assertNotIn("gemini", script.lower())
         self.assertIn("update_brew_package formula qwen-code", script)
         self.assertIn("update_brew_package formula mistral-vibe", script)
         self.assertIn("update_brew_package formula ollama", script)
@@ -3487,7 +3492,7 @@ class NodeInstallAndWorkflowTests(unittest.TestCase):
         selected = [
             next(spec for spec in m.CLI_SPECS if spec.key == "codex"),
             next(spec for spec in m.CLI_SPECS if spec.key == "mistral"),
-            next(spec for spec in m.CLI_SPECS if spec.key == "gemini"),
+            next(spec for spec in m.CLI_SPECS if spec.key == "qwen"),
         ]
 
         state: dict[str, object] = {
@@ -3579,7 +3584,7 @@ class NodeInstallAndWorkflowTests(unittest.TestCase):
         self.assertTrue(any("Using npm executable:" in x for x in dummy.logs))
         self.assertTrue(any("Skipping optional Mistral Vibe CLI" in x for x in dummy.logs))
         self.assertTrue(any("Installed Codex CLI" in x for x in dummy.logs))
-        self.assertTrue(any("Installed Gemini CLI" in x for x in dummy.logs))
+        self.assertTrue(any("Installed Qwen CLI" in x for x in dummy.logs))
         self.assertTrue(any("System PATH update warning:" in x for x in dummy.logs))
         self.assertTrue(any("hidden auto-update task configured" in x.lower() for x in dummy.logs))
         self.assertTrue(any("Installation workflow complete." in x for x in dummy.logs))
@@ -3588,12 +3593,12 @@ class NodeInstallAndWorkflowTests(unittest.TestCase):
             state["shortcuts"],
             [
                 ("codex", r"C:\Users\Admin\AppData\Roaming\npm\codex.cmd"),
-                ("gemini", r"C:\Users\Admin\AppData\Roaming\npm\gemini.cmd"),
+                ("qwen", r"C:\Users\Admin\AppData\Roaming\npm\qwen.cmd"),
             ],
         )
-        self.assertEqual(state["npm_installs"], ["codex", "gemini"])
+        self.assertEqual(state["npm_installs"], ["codex", "qwen"])
         self.assertEqual(state["mistral_installs"], ["mistral"])
-        self.assertEqual(state["auto_update_packages"], ["@openai/codex", "@google/gemini-cli"])
+        self.assertEqual(state["auto_update_packages"], ["@openai/codex", "@qwen-code/qwen-code"])
         system_updates = [dirs for scope, dirs in state["path_updates"] if scope == "system"]
         self.assertTrue(system_updates, "Expected at least one system PATH update call")
         self.assertTrue(
@@ -4023,45 +4028,9 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn("master", run_args)
         self.assertIn("--force", run_args)
 
-    def test_rtk_install_configures_gemini_without_overwriting_memory(self) -> None:
-        spec = next(s for s in m.CLI_SPECS if s.key == "rtk")
-        with tempfile.TemporaryDirectory() as tmp:
-            gemini_dir = os.path.join(tmp, ".gemini")
-            os.makedirs(gemini_dir)
-            gemini_md = os.path.join(gemini_dir, "GEMINI.md")
-            with open(gemini_md, "w", encoding="utf-8", newline="\n") as fh:
-                fh.write("## Existing Gemini Memory\n- keep me\n")
-
-            def fake_which(name: str) -> Optional[str]:
-                return name if name == "gemini" else None
-
-            with (
-                patch.object(m, "ensure_rust_toolchain", return_value=os.path.join(tmp, ".cargo", "bin", "cargo")),
-                patch.object(m, "_clear_cargo_git_cache_for"),
-                patch.object(m, "run_command", return_value=0),
-                patch.object(m.os.path, "isfile", return_value=True),
-                patch.object(m.os.path, "expanduser", return_value=tmp),
-                patch.object(m.shutil, "which", side_effect=fake_which),
-                patch.object(m, "is_windows", return_value=False),
-                patch.object(m, "is_linux", return_value=False),
-            ):
-                ok, pkg = m.try_install_rtk(spec, lambda _msg: None)
-
-            self.assertTrue(ok)
-            self.assertEqual(pkg, "rtk")
-            with open(gemini_md, "r", encoding="utf-8") as fh:
-                gemini_content = fh.read()
-            self.assertTrue(gemini_content.startswith("@RTK.md\n\n"))
-            self.assertIn("## Existing Gemini Memory", gemini_content)
-            with open(os.path.join(gemini_dir, "RTK.md"), "r", encoding="utf-8") as fh:
-                self.assertIn("Rust Token Killer (Gemini CLI)", fh.read())
-            with open(os.path.join(gemini_dir, "settings.json"), "r", encoding="utf-8") as fh:
-                settings = json.load(fh)
-            hook = settings["hooks"]["BeforeTool"][0]["hooks"][0]
-            self.assertEqual(hook["command"], os.path.join(tmp, ".cargo", "bin", "rtk") + " hook gemini")
-
     def test_rtk_configures_detected_optional_integrations(self) -> None:
-        detected = {"copilot", "opencode", "cursor"}
+        # Antigravity must be wired into rtk like the other agents.
+        detected = {"copilot", "opencode", "cursor", "antigravity"}
 
         def fake_which(name: str) -> Optional[str]:
             return name if name in detected else None
@@ -4077,6 +4046,7 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn(["/tmp/rtk", "init", "-g", "--copilot"], calls)
         self.assertIn(["/tmp/rtk", "init", "-g", "--opencode"], calls)
         self.assertIn(["/tmp/rtk", "init", "-g", "--agent", "cursor"], calls)
+        self.assertIn(["/tmp/rtk", "init", "-g", "--agent", "antigravity"], calls)
 
     def test_clear_cargo_git_cache_removes_only_matching_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4167,7 +4137,9 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn("update_rtk", script)
         self.assertIn("configure_rtk_integrations", script)
         self.assertIn("configure_rtk_supported_agents", script)
-        self.assertIn("Registered rtk hook for Gemini CLI", script)
+        # Antigravity is wired into rtk via the --agent loop.
+        self.assertIn("antigravity hermes", script)
+        self.assertNotIn("gemini", script.lower())
         self.assertIn("--copilot", script)
         self.assertIn('--agent "$agent"', script)
         # rtk must be a listed target and a parser alias.
@@ -4185,7 +4157,8 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn("update_rtk", script)
         self.assertIn("configure_rtk_integrations", script)
         self.assertIn("configure_rtk_supported_agents", script)
-        self.assertIn("Registered rtk hook for Gemini CLI", script)
+        self.assertIn("antigravity hermes", script)
+        self.assertNotIn("gemini", script.lower())
         self.assertIn("--copilot", script)
         self.assertIn('--agent "$agent"', script)
         self.assertIn("ollama|rtk|all", script)
@@ -4200,8 +4173,8 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn("--branch', 'master', '--force'", script)
         self.assertIn("rtk-ai/rtk", script)
         self.assertIn("Update-Rtk", script)
-        self.assertIn("Ensure-GeminiRtkConfig", script)
-        self.assertIn("hook gemini", script)
+        self.assertNotIn("Gemini", script)
+        self.assertIn("'antigravity','hermes'", script)
         self.assertIn("--copilot", script)
         self.assertIn("'--agent', $agent", script)
         # Hook command: bare form via Git-Bash shim, absolute-path fallback.
@@ -4223,8 +4196,8 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn(".claude\\settings.json", script)
         self.assertIn("Install-RtkBashShim", script)
         self.assertIn("'rtk hook claude'", script)
-        self.assertIn("Ensure-GeminiRtkConfig", script)
-        self.assertIn("hook gemini", script)
+        self.assertNotIn("Gemini", script)
+        self.assertIn("'antigravity','hermes'", script)
         self.assertIn("--copilot", script)
         self.assertIn("'--agent',$agent", script)
         self.assertIn("Get-Process -Name 'rtk'", script)
@@ -4235,7 +4208,8 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn("rtk-ai/rtk", script)
         self.assertIn("--branch master --force", script)
         self.assertIn("rtk-*", script)
-        self.assertIn("--gemini", script)
+        self.assertIn("antigravity hermes", script)
+        self.assertNotIn("gemini", script.lower())
         self.assertIn("--copilot", script)
         self.assertIn('--agent "$agent"', script)
 
@@ -4246,6 +4220,309 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn("rtk-ai/rtk", readme)
         # Sanity check list should include rtk.
         self.assertIn("\nrtk\n", readme)
+
+
+class AntigravityVSCodeInstallTests(unittest.TestCase):
+    def _spec(self, key: str) -> "m.CliSpec":
+        return next(s for s in m.CLI_SPECS if s.key == key)
+
+    def test_cli_is_app_installer_flags(self) -> None:
+        self.assertTrue(m.cli_is_app_installer(self._spec("antigravity")))
+        self.assertTrue(m.cli_is_app_installer(self._spec("vscode")))
+        self.assertFalse(m.cli_is_app_installer(self._spec("codex")))
+        self.assertFalse(m.cli_is_app_installer(self._spec("mistral")))
+
+    def test_select_latest_antigravity_prefix(self) -> None:
+        prefixes = [
+            "antigravity-hub/2.0.6-5413878570549248/",
+            "antigravity-hub/2.0.7-4757248736624640/",
+            "antigravity-hub/1.0.55-5809366742466560/",
+            "antigravity-hub/100.0.0-6081531354152960/",  # canary sentinel, skipped
+            "antigravity-hub/dogfood/",  # non-numeric, skipped
+            "antigravity-hub/",  # bucket root, skipped
+        ]
+        self.assertEqual(
+            m.select_latest_antigravity_prefix(prefixes),
+            "antigravity-hub/2.0.7-4757248736624640/",
+        )
+        self.assertIsNone(m.select_latest_antigravity_prefix([]))
+        self.assertIsNone(m.select_latest_antigravity_prefix(["antigravity-hub/dogfood/"]))
+
+    def test_resolve_latest_antigravity_tarball_url(self) -> None:
+        listing = json.dumps({"prefixes": ["antigravity-hub/2.0.7-4757248736624640/"]})
+        good = types.SimpleNamespace(returncode=0, stdout=listing)
+        with patch.object(m, "_probe_command", return_value=good):
+            url = m.resolve_latest_antigravity_tarball_url(lambda _m: None)
+        self.assertEqual(
+            url,
+            "https://storage.googleapis.com/antigravity-public/"
+            "antigravity-hub/2.0.7-4757248736624640/linux-x64/Antigravity.tar.gz",
+        )
+        with patch.object(m, "_probe_command", return_value=None):
+            self.assertIsNone(m.resolve_latest_antigravity_tarball_url(lambda _m: None))
+        bad = types.SimpleNamespace(returncode=0, stdout="not json")
+        with patch.object(m, "_probe_command", return_value=bad):
+            self.assertIsNone(m.resolve_latest_antigravity_tarball_url(lambda _m: None))
+        empty = types.SimpleNamespace(returncode=0, stdout=json.dumps({"prefixes": []}))
+        with patch.object(m, "_probe_command", return_value=empty):
+            self.assertIsNone(m.resolve_latest_antigravity_tarball_url(lambda _m: None))
+
+    def test_find_app_launcher_prefers_bin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            top = os.path.join(tmp, "App")
+            os.makedirs(os.path.join(top, "bin"))
+            open(os.path.join(top, "antigravity"), "w").close()
+            open(os.path.join(top, "bin", "antigravity"), "w").close()
+            launcher = m._find_app_launcher(tmp, "antigravity")
+            self.assertEqual(os.path.basename(os.path.dirname(launcher)), "bin")
+            self.assertIsNone(m._find_app_launcher(tmp, "does-not-exist"))
+
+    def test_ensure_cli_via_winget_install_success(self) -> None:
+        spec = self._spec("antigravity")
+        with (
+            patch.object(m, "find_winget", return_value="winget"),
+            patch.object(m, "run_command", return_value=0) as run_mock,
+        ):
+            ok, pkg = m.ensure_cli_via_winget(spec, lambda _m: None)
+        self.assertTrue(ok)
+        self.assertEqual(pkg, "Google.Antigravity")
+        self.assertIn("Google.Antigravity", run_mock.call_args_list[0].args[0])
+
+    def test_ensure_cli_via_winget_no_winget(self) -> None:
+        with patch.object(m, "find_winget", return_value=None):
+            ok, detail = m.ensure_cli_via_winget(self._spec("vscode"), lambda _m: None)
+        self.assertFalse(ok)
+        self.assertIn("winget", detail)
+
+    def test_ensure_cli_via_winget_install_fails_then_upgrade_succeeds(self) -> None:
+        with (
+            patch.object(m, "find_winget", return_value="winget"),
+            patch.object(m, "run_command", side_effect=[1, 0]),
+        ):
+            ok, pkg = m.ensure_cli_via_winget(self._spec("vscode"), lambda _m: None)
+        self.assertTrue(ok)
+        self.assertEqual(pkg, "Microsoft.VisualStudioCode")
+
+    def test_ensure_cli_via_winget_falls_back_to_existing(self) -> None:
+        with (
+            patch.object(m, "find_winget", return_value="winget"),
+            patch.object(m, "run_command", side_effect=[1, 1]),
+            patch.object(m, "get_app_cli_bin_dirs", return_value=[]),
+            patch.object(m, "resolve_command_path", return_value=r"C:\AG\bin\antigravity.cmd"),
+        ):
+            ok, pkg = m.ensure_cli_via_winget(self._spec("antigravity"), lambda _m: None)
+        self.assertTrue(ok)
+
+    def test_ensure_cli_via_winget_both_fail_no_existing(self) -> None:
+        with (
+            patch.object(m, "find_winget", return_value="winget"),
+            patch.object(m, "run_command", side_effect=[1, 1]),
+            patch.object(m, "get_app_cli_bin_dirs", return_value=[]),
+            patch.object(m, "resolve_command_path", return_value=None),
+        ):
+            ok, _detail = m.ensure_cli_via_winget(self._spec("antigravity"), lambda _m: None)
+        self.assertFalse(ok)
+
+    def test_install_tarball_app_linux_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            extract = os.path.join(tmp, "extract")
+            app_root = os.path.join(extract, "App")
+            os.makedirs(os.path.join(app_root, "bin"))
+            launcher = os.path.join(app_root, "bin", "code")
+            open(launcher, "w").close()
+            calls: list[list[str]] = []
+
+            def fake_run(args, _log):
+                calls.append(args)
+                return 0
+
+            with (
+                patch.object(m, "command_exists", return_value=True),
+                patch.object(m, "run_command", side_effect=fake_run),
+                patch.object(m.tempfile, "mkdtemp", return_value=tmp),
+                patch.object(m, "_linux_sudo", return_value=[]),
+                patch.object(m, "_linux_user_bin_dir", return_value="/usr/local/bin"),
+                patch.object(m.shutil, "rmtree"),
+            ):
+                ok, detail = m._install_tarball_app_linux(
+                    "https://example/code.tgz", "/opt/visual-studio-code", "code", "VS Code", lambda _m: None
+                )
+        self.assertTrue(ok)
+        self.assertEqual(detail, "/opt/visual-studio-code")
+        ln_calls = [c for c in calls if c and c[0] == "ln"]
+        self.assertEqual(
+            ln_calls[0],
+            [
+                "ln",
+                "-sf",
+                os.path.join("/opt/visual-studio-code", "bin", "code"),
+                os.path.join("/usr/local/bin", "code"),
+            ],
+        )
+
+    def test_install_tarball_app_linux_no_tar(self) -> None:
+        with patch.object(m, "command_exists", return_value=False):
+            ok, detail = m._install_tarball_app_linux("u", "/opt/x", "x", "X", lambda _m: None)
+        self.assertFalse(ok)
+        self.assertIn("tar", detail)
+
+    def test_install_tarball_app_linux_download_failure(self) -> None:
+        with (
+            patch.object(m, "command_exists", return_value=True),
+            patch.object(m.tempfile, "mkdtemp", return_value=tempfile.mkdtemp()),
+            patch.object(m, "run_command", return_value=1),
+            patch.object(m.shutil, "rmtree"),
+        ):
+            ok, detail = m._install_tarball_app_linux("u", "/opt/x", "x", "X", lambda _m: None)
+        self.assertFalse(ok)
+        self.assertIn("download failed", detail)
+
+    def test_install_tarball_app_linux_missing_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "extract"))
+            with (
+                patch.object(m, "command_exists", return_value=True),
+                patch.object(m.tempfile, "mkdtemp", return_value=tmp),
+                patch.object(m, "run_command", return_value=0),
+                patch.object(m, "_find_app_launcher", return_value=None),
+                patch.object(m.shutil, "rmtree"),
+            ):
+                ok, detail = m._install_tarball_app_linux("u", "/opt/x", "x", "X", lambda _m: None)
+        self.assertFalse(ok)
+        self.assertIn("launcher", detail)
+
+    def test_install_antigravity_linux(self) -> None:
+        with (
+            patch.object(m, "command_exists", return_value=True),
+            patch.object(m, "resolve_latest_antigravity_tarball_url", return_value="https://x/Antigravity.tar.gz"),
+            patch.object(m, "_install_tarball_app_linux", return_value=(True, "/opt/antigravity")),
+        ):
+            ok, pkg = m.install_antigravity_linux(lambda _m: None)
+        self.assertTrue(ok)
+        self.assertEqual(pkg, "Google.Antigravity")
+        with (
+            patch.object(m, "command_exists", return_value=True),
+            patch.object(m, "resolve_latest_antigravity_tarball_url", return_value=None),
+        ):
+            ok, _detail = m.install_antigravity_linux(lambda _m: None)
+        self.assertFalse(ok)
+
+    def test_install_vscode_linux_debian(self) -> None:
+        calls: list[list[str]] = []
+        with (
+            patch.object(m, "detect_linux_distro_family", return_value="debian"),
+            patch.object(m, "command_exists", return_value=True),
+            patch.object(m.tempfile, "mkdtemp", return_value=tempfile.mkdtemp()),
+            patch.object(m, "_linux_sudo", return_value=[]),
+            patch.object(m, "run_command", side_effect=lambda a, _l: (calls.append(a) or 0)),
+            patch.object(m.shutil, "rmtree"),
+        ):
+            ok, pkg = m.install_vscode_linux(lambda _m: None)
+        self.assertTrue(ok)
+        self.assertEqual(pkg, "Microsoft.VisualStudioCode")
+        self.assertTrue(any(a[:3] == ["apt-get", "install", "-y"] for a in calls))
+
+    def test_install_vscode_linux_fedora(self) -> None:
+        calls: list[list[str]] = []
+        with (
+            patch.object(m, "detect_linux_distro_family", return_value="fedora"),
+            patch.object(m, "command_exists", return_value=True),
+            patch.object(m.tempfile, "mkdtemp", return_value=tempfile.mkdtemp()),
+            patch.object(m, "_linux_sudo", return_value=[]),
+            patch.object(m, "run_command", side_effect=lambda a, _l: (calls.append(a) or 0)),
+            patch.object(m.shutil, "rmtree"),
+        ):
+            ok, _pkg = m.install_vscode_linux(lambda _m: None)
+        self.assertTrue(ok)
+        self.assertTrue(any(a[:3] == ["dnf", "install", "-y"] for a in calls))
+
+    def test_install_vscode_linux_arch_tarball_fallback(self) -> None:
+        with patch.object(m, "detect_linux_distro_family", return_value="arch"), patch.object(
+            m, "command_exists", return_value=True
+        ), patch.object(m, "_install_tarball_app_linux", return_value=(True, "/opt/visual-studio-code")) as tb:
+            ok, pkg = m.install_vscode_linux(lambda _m: None)
+        self.assertTrue(ok)
+        self.assertEqual(pkg, "Microsoft.VisualStudioCode")
+        tb.assert_called_once()
+
+    def test_ensure_app_cli_dispatch(self) -> None:
+        ag = self._spec("antigravity")
+        vs = self._spec("vscode")
+        with patch.object(m, "is_windows", return_value=True), patch.object(m, "is_linux", return_value=False), patch.object(m, "is_macos", return_value=False), patch.object(m, "ensure_cli_via_winget", return_value=(True, "x")) as w:
+            self.assertEqual(m.ensure_app_cli(ag, lambda _m: None), (True, "x"))
+            w.assert_called_once()
+        with patch.object(m, "is_windows", return_value=False), patch.object(m, "is_linux", return_value=True), patch.object(m, "is_macos", return_value=False), patch.object(m, "install_antigravity_linux", return_value=(True, "ag")) as a:
+            self.assertEqual(m.ensure_app_cli(ag, lambda _m: None), (True, "ag"))
+            a.assert_called_once()
+        with patch.object(m, "is_windows", return_value=False), patch.object(m, "is_linux", return_value=True), patch.object(m, "is_macos", return_value=False), patch.object(m, "install_vscode_linux", return_value=(True, "vs")) as v:
+            self.assertEqual(m.ensure_app_cli(vs, lambda _m: None), (True, "vs"))
+            v.assert_called_once()
+        with patch.object(m, "is_windows", return_value=False), patch.object(m, "is_linux", return_value=False), patch.object(m, "is_macos", return_value=True), patch.object(m, "brew_install_or_upgrade", return_value=(True, "antigravity")) as b:
+            self.assertEqual(m.ensure_app_cli(ag, lambda _m: None), (True, "antigravity"))
+            b.assert_called_once_with("antigravity", unittest.mock.ANY, cask=True)
+
+    def test_uninstall_app_cli_windows(self) -> None:
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "is_linux", return_value=False),
+            patch.object(m, "is_macos", return_value=False),
+            patch.object(m, "find_winget", return_value="winget"),
+            patch.object(m, "run_command", return_value=0) as run_mock,
+        ):
+            ok, _ = m.uninstall_app_cli(self._spec("vscode"), lambda _m: None)
+        self.assertTrue(ok)
+        self.assertIn("uninstall", run_mock.call_args.args[0])
+
+    def test_uninstall_app_cli_linux_vscode_debian(self) -> None:
+        calls: list[list[str]] = []
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_linux", return_value=True),
+            patch.object(m, "is_macos", return_value=False),
+            patch.object(m, "detect_linux_distro_family", return_value="debian"),
+            patch.object(m, "_linux_sudo", return_value=[]),
+            patch.object(m, "_linux_user_bin_dir", return_value="/usr/local/bin"),
+            patch.object(m, "run_command", side_effect=lambda a, _l: (calls.append(a) or 0)),
+        ):
+            ok, _ = m.uninstall_app_cli(self._spec("vscode"), lambda _m: None)
+        self.assertTrue(ok)
+        self.assertTrue(any(a[:3] == ["apt-get", "remove", "-y"] for a in calls))
+
+    def test_uninstall_app_cli_linux_antigravity(self) -> None:
+        calls: list[list[str]] = []
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_linux", return_value=True),
+            patch.object(m, "is_macos", return_value=False),
+            patch.object(m, "_linux_sudo", return_value=[]),
+            patch.object(m, "_linux_user_bin_dir", return_value="/usr/local/bin"),
+            patch.object(m, "run_command", side_effect=lambda a, _l: (calls.append(a) or 0)),
+        ):
+            ok, _ = m.uninstall_app_cli(self._spec("antigravity"), lambda _m: None)
+        self.assertTrue(ok)
+        self.assertTrue(any(a[:2] == ["rm", "-rf"] for a in calls))
+
+    def test_uninstall_app_cli_macos(self) -> None:
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_linux", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "brew_uninstall", return_value=(True, "antigravity")) as b,
+        ):
+            ok, _ = m.uninstall_app_cli(self._spec("antigravity"), lambda _m: None)
+        self.assertTrue(ok)
+        b.assert_called_once_with("antigravity", unittest.mock.ANY, cask=True)
+
+    def test_get_app_cli_bin_dirs_platforms(self) -> None:
+        with patch.object(m, "is_windows", return_value=True), patch.object(m, "is_linux", return_value=False), patch.object(m, "is_macos", return_value=False), patch.dict(m.os.environ, {"LocalAppData": r"C:\Users\u\AppData\Local"}), patch.object(m.os.path, "isdir", return_value=True):
+            dirs = m.get_app_cli_bin_dirs(self._spec("antigravity"), lambda _m: None)
+        self.assertTrue(any("Antigravity" in d for d in dirs))
+        with patch.object(m, "is_windows", return_value=False), patch.object(m, "is_linux", return_value=True), patch.object(m, "is_macos", return_value=False), patch.object(m, "is_admin", return_value=True), patch.object(m.os.path, "isdir", return_value=True):
+            dirs = m.get_app_cli_bin_dirs(self._spec("antigravity"), lambda _m: None)
+        self.assertIn("/usr/local/bin", dirs)
+        with patch.object(m, "is_windows", return_value=False), patch.object(m, "is_linux", return_value=False), patch.object(m, "is_macos", return_value=True), patch.object(m.os.path, "isdir", return_value=True):
+            dirs = m.get_app_cli_bin_dirs(self._spec("vscode"), lambda _m: None)
+        self.assertTrue(any("Visual Studio Code.app" in d for d in dirs))
 
 
 if __name__ == "__main__":  # pragma: no cover

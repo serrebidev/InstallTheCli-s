@@ -31,6 +31,28 @@ SMTO_ABORTIFHUNG = 0x0002
 NODE_WINGET_ID = "OpenJS.NodeJS.LTS"
 PYTHON_314_WINGET_ID = "Python.Python.3.14"
 OLLAMA_WINGET_ID = "Ollama.Ollama"
+ANTIGRAVITY_WINGET_ID = "Google.Antigravity"
+VSCODE_WINGET_ID = "Microsoft.VisualStudioCode"
+# Google Antigravity publishes its Linux builds (tar.gz + AppImage) to a public
+# Google Cloud Storage bucket under versioned prefixes. There is no stable
+# "latest" alias, so the Linux installer lists the bucket and resolves the
+# newest version directory at install time.
+ANTIGRAVITY_GCS_BUCKET = "antigravity-public"
+ANTIGRAVITY_GCS_PREFIX = "antigravity-hub/"
+ANTIGRAVITY_GCS_LIST_URL = (
+    "https://storage.googleapis.com/storage/v1/b/"
+    + ANTIGRAVITY_GCS_BUCKET
+    + "/o?prefix="
+    + ANTIGRAVITY_GCS_PREFIX
+    + "&delimiter=/"
+)
+ANTIGRAVITY_GCS_OBJECT_BASE = "https://storage.googleapis.com/" + ANTIGRAVITY_GCS_BUCKET + "/"
+ANTIGRAVITY_LINUX_TARBALL_NAME = "linux-x64/Antigravity.tar.gz"
+# Microsoft serves stable VS Code Linux packages from redirector URLs that
+# always point at the current release.
+VSCODE_LINUX_DEB_URL = "https://code.visualstudio.com/sha/download?build=stable&os=linux-deb-x64"
+VSCODE_LINUX_RPM_URL = "https://code.visualstudio.com/sha/download?build=stable&os=linux-rpm-x64"
+VSCODE_LINUX_TARBALL_URL = "https://code.visualstudio.com/sha/download?build=stable&os=linux-x64"
 LINUX_OLLAMA_INSTALL_URL = "https://ollama.com/install.sh"
 OPENCLAW_INSTALL_URL = "https://openclaw.ai/install.sh"
 HOMEBREW_INSTALL_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
@@ -49,7 +71,6 @@ MACOS_AUTO_UPDATE_PLIST_ID = "com.installthecli.ai-cli-updates"
 MACOS_AUTO_UPDATE_PLIST_FILE = MACOS_AUTO_UPDATE_PLIST_ID + ".plist"
 CODEX_NPM_PACKAGE = "@openai/codex"
 CLAUDE_NPM_PACKAGE = "@anthropic-ai/claude-code"
-GEMINI_NPM_PACKAGE = "@google/gemini-cli"
 GROK_NPM_PACKAGE = "@vibe-kit/grok-cli"
 OPENCLAW_NPM_PACKAGE = "openclaw"
 GUI_LAST_RUN_LOG_FILE = "gui_last_run.log"
@@ -57,48 +78,9 @@ NPM_INSTALL_MAX_ATTEMPTS = 3
 NPM_INSTALL_RETRY_DELAY_SECONDS = 2.0
 NPM_QUIET_FLAGS = ["--no-fund", "--no-audit", "--no-update-notifier", "--loglevel", "error"]
 PIP_QUIET_FLAGS = ["--disable-pip-version-check", "--no-input", "--quiet"]
-MACOS_BREW_FORMULA_CLIS = ("gemini-cli", "qwen-code", "mistral-vibe", "ollama", "ironclaw")
-MACOS_BREW_CASK_CLIS = ("claude-code", "codex", "copilot-cli")
+MACOS_BREW_FORMULA_CLIS = ("qwen-code", "mistral-vibe", "ollama", "ironclaw")
+MACOS_BREW_CASK_CLIS = ("claude-code", "codex", "copilot-cli", "antigravity", "visual-studio-code")
 MACOS_NPM_UPDATE_PACKAGES = (GROK_NPM_PACKAGE, OPENCLAW_NPM_PACKAGE)
-RTK_GEMINI_MD = """# RTK - Rust Token Killer (Gemini CLI)
-
-**Usage**: Token-optimized CLI proxy for shell commands.
-
-## Rule
-
-Always prefix shell commands with `rtk`.
-
-Examples:
-
-```bash
-rtk git status
-rtk cargo test
-rtk npm run build
-rtk pytest -q
-```
-
-## Hook-Based Usage
-
-Shell commands are automatically rewritten by the Gemini CLI `BeforeTool` hook.
-Example: `git status` -> `rtk git status` (transparent, 0 tokens overhead)
-
-## Meta Commands
-
-```bash
-rtk gain            # Token savings analytics
-rtk gain --history  # Recent command savings history
-rtk proxy <cmd>     # Run raw command without filtering
-```
-
-## Verification
-
-```bash
-rtk --version
-rtk gain
-which rtk
-```
-"""
-
 RTK_OPTIONAL_INTEGRATIONS = (
     ("GitHub Copilot CLI", ("copilot", "github-copilot-cli", "github-copilot"), ("--copilot",)),
     ("OpenCode", ("opencode",), ("--opencode",)),
@@ -129,7 +111,20 @@ class CliSpec:
     # of npm/brew/winget.
     cargo_git_url: Optional[str] = None
     cargo_git_branch: Optional[str] = None
+    # IDE-style installs (Antigravity, VS Code): a desktop editor that ships a
+    # CLI shim. Installed via winget on Windows, a Homebrew cask on macOS, and a
+    # direct download from the vendor on Linux. `linux_install_kind` selects the
+    # Linux download path: "antigravity_tarball" or "vscode_pkg".
+    winget_id: Optional[str] = None
+    winget_source: Optional[str] = None
+    linux_install_kind: Optional[str] = None
     optional: bool = False
+
+
+def cli_is_app_installer(spec: "CliSpec") -> bool:
+    """True for IDE-style CLIs installed via winget/brew-cask/direct-download
+    (Antigravity, VS Code) rather than npm/pip/cargo."""
+    return bool(spec.winget_id or spec.linux_install_kind)
 
 
 @dataclass(frozen=True)
@@ -168,13 +163,32 @@ CLI_SPECS: tuple[CliSpec, ...] = (
         macos_brew_cask="codex",
     ),
     CliSpec(
-        key="gemini",
-        label="Gemini CLI",
-        help_text="Installs Google Gemini CLI from npm.",
-        package_candidates=("@google/gemini-cli",),
-        command_candidates=("gemini",),
-        shortcut_name="Gemini CLI",
-        macos_brew_formula="gemini-cli",
+        key="antigravity",
+        label="Antigravity (Google)",
+        help_text=(
+            "Installs Google Antigravity agentic IDE and its `antigravity` CLI "
+            "(Windows: winget; macOS: Homebrew cask; Linux: official tar.gz from antigravity.google)."
+        ),
+        package_candidates=(ANTIGRAVITY_WINGET_ID,),
+        command_candidates=("antigravity",),
+        shortcut_name="Antigravity",
+        macos_brew_cask="antigravity",
+        winget_id=ANTIGRAVITY_WINGET_ID,
+        linux_install_kind="antigravity_tarball",
+    ),
+    CliSpec(
+        key="vscode",
+        label="Visual Studio Code",
+        help_text=(
+            "Installs Microsoft Visual Studio Code and its `code` CLI "
+            "(Windows: winget; macOS: Homebrew cask; Linux: official .deb/.rpm/tar.gz from code.visualstudio.com)."
+        ),
+        package_candidates=(VSCODE_WINGET_ID,),
+        command_candidates=("code",),
+        shortcut_name="Visual Studio Code",
+        macos_brew_cask="visual-studio-code",
+        winget_id=VSCODE_WINGET_ID,
+        linux_install_kind="vscode_pkg",
     ),
     CliSpec(
         key="grok",
@@ -657,7 +671,6 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
     )
     codex_pkg_literal = powershell_single_quote(CODEX_NPM_PACKAGE)
     claude_pkg_literal = powershell_single_quote(CLAUDE_NPM_PACKAGE)
-    gemini_pkg_literal = powershell_single_quote(GEMINI_NPM_PACKAGE)
     lines = [
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
@@ -808,22 +821,6 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         f"  if ($pkg -eq {codex_pkg_literal}) {{ Remove-CodexNpmTempDirs }}",
         f"  if ($pkg -eq {claude_pkg_literal}) {{ Repair-ClaudeAfterFailedUpdate }}",
         "}",
-        # Re-emit the gemini shim if @google/gemini-cli is in the package set.
-        # Gemini's npm shim can break across versions when the package layout
-        # under node_modules/@google changes; rewriting the shim each run keeps
-        # the `gemini` command working regardless.
-        f"if ($packages -contains {gemini_pkg_literal}) {{",
-        "  try {",
-        "    $npmBin = & $npm prefix -g 2>$null",
-        "    if ($npmBin) { $npmBin = $npmBin.Trim() }",
-        "    if ($npmBin -and (Test-Path -LiteralPath $npmBin)) {",
-        "      $geminiCmd = \"@ECHO off`r`nGOTO start`r`n:find_dp0`r`nSET dp0=%~dp0`r`nEXIT /b`r`n:start`r`nSETLOCAL`r`nCALL :find_dp0`r`n`r`nSET `\"GEMINI_ENTRY=`\"`r`nIF EXIST `\"%dp0%node_modules\\@google\\gemini-cli\\bundle\\gemini.js`\" (`r`n  SET `\"GEMINI_ENTRY=%dp0%node_modules\\@google\\gemini-cli\\bundle\\gemini.js`\"`r`n) ELSE IF EXIST `\"%dp0%node_modules\\@google\\gemini-cli\\dist\\index.js`\" (`r`n  SET `\"GEMINI_ENTRY=%dp0%node_modules\\@google\\gemini-cli\\dist\\index.js`\"`r`n) ELSE (`r`n  for /d %%D in (`\"%dp0%node_modules\\@google\\.gemini-cli-*`\") do (`r`n    IF EXIST `\"%%~fD\\bundle\\gemini.js`\" (`r`n      SET `\"GEMINI_ENTRY=%%~fD\\bundle\\gemini.js`\"`r`n      GOTO found`r`n    )`r`n    IF EXIST `\"%%~fD\\dist\\index.js`\" (`r`n      SET `\"GEMINI_ENTRY=%%~fD\\dist\\index.js`\"`r`n      GOTO found`r`n    )`r`n  )`r`n)`r`n`r`n:found`r`nIF NOT DEFINED GEMINI_ENTRY (`r`n  ECHO Gemini CLI package not found under `\"%dp0%node_modules\\@google`\" 1>&2`r`n  EXIT /b 1`r`n)`r`n`r`nIF EXIST `\"%dp0%node.exe`\" (`r`n  SET `\"_prog=%dp0%node.exe`\"`r`n) ELSE (`r`n  SET `\"_prog=node`\"`r`n  SET PATHEXT=%PATHEXT:;.JS;=;%`r`n)`r`n`r`nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & `\"%_prog%`\"  `\"%GEMINI_ENTRY%`\" %*`r`n\"",
-        "      Set-Content -LiteralPath (Join-Path $npmBin 'gemini.cmd') -Value $geminiCmd -Encoding ASCII",
-        "      $ps1Shim = Join-Path $npmBin 'gemini.ps1'",
-        "      if (Test-Path -LiteralPath $ps1Shim) { Remove-Item -LiteralPath $ps1Shim -Force -ErrorAction SilentlyContinue }",
-        "    }",
-        "  } catch { }",
-        "}",
         "function Write-Utf8NoBom([string]$Path, [string]$Content) {",
         "  $dir = Split-Path -Parent $Path",
         "  if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }",
@@ -834,45 +831,6 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "  if (-not (Test-Path -LiteralPath $Path)) { Write-Utf8NoBom $Path \"$ImportLine`n\"; return }",
         "  $content = Get-Content -LiteralPath $Path -Raw",
         "  if ($content -notmatch \"(?m)^$([regex]::Escape($ImportLine))\\s*$\") { Write-Utf8NoBom $Path \"$ImportLine`n`n$content\" }",
-        "}",
-        "function Ensure-GeminiRtkConfig([string]$RtkExe) {",
-        "  if (-not (Get-Command gemini -ErrorAction SilentlyContinue)) { return }",
-        "  $geminiDir = Join-Path $env:USERPROFILE '.gemini'",
-        "  if (-not (Test-Path -LiteralPath $geminiDir)) { New-Item -ItemType Directory -Force -Path $geminiDir | Out-Null }",
-        "  $rtkMd = @'",
-        "# RTK - Rust Token Killer (Gemini CLI)",
-        "",
-        "**Usage**: Token-optimized CLI proxy for shell commands.",
-        "",
-        "## Rule",
-        "",
-        "Always prefix shell commands with `rtk`.",
-        "",
-        "## Hook-Based Usage",
-        "",
-        "Shell commands are automatically rewritten by the Gemini CLI `BeforeTool` hook.",
-        "Example: `git status` -> `rtk git status` (transparent, 0 tokens overhead)",
-        "'@",
-        "  Write-Utf8NoBom (Join-Path $geminiDir 'RTK.md') ($rtkMd + \"`n\")",
-        "  Ensure-MarkdownImport (Join-Path $geminiDir 'GEMINI.md') '@RTK.md'",
-        "  $settingsPath = Join-Path $geminiDir 'settings.json'",
-        "  try {",
-        "    $s = if (Test-Path -LiteralPath $settingsPath) { Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }",
-        "    if (-not $s.PSObject.Properties['hooks']) { $s | Add-Member -MemberType NoteProperty -Name hooks -Value ([pscustomobject]@{}) }",
-        "    if (-not $s.hooks.PSObject.Properties['BeforeTool']) { $s.hooks | Add-Member -MemberType NoteProperty -Name BeforeTool -Value @() }",
-        "    $kept = @()",
-        "    foreach ($entry in @($s.hooks.BeforeTool)) {",
-        "      $hasRtkGemini = $false",
-        "      foreach ($h in @($entry.hooks)) {",
-        "        if ($h.type -eq 'command' -and (($h.command -as [string]) -match 'rtk(\\.exe)?\\s+hook\\s+gemini')) { $hasRtkGemini = $true }",
-        "      }",
-        "      if ($entry.matcher -eq 'run_shell_command' -and $hasRtkGemini) { continue }",
-        "      $kept += $entry",
-        "    }",
-        "    $kept += [pscustomobject]@{ matcher = 'run_shell_command'; hooks = @([pscustomobject]@{ name = 'rtk-gemini-shell-prefix'; type = 'command'; command = \"$RtkExe hook gemini\" }) }",
-        "    $s.hooks.BeforeTool = @($kept)",
-        "    Write-Utf8NoBom $settingsPath (($s | ConvertTo-Json -Depth 20) + \"`n\")",
-        "  } catch { }",
         "}",
         "function Test-AnyCmd([string[]]$CommandNames) {",
         "  foreach ($name in $CommandNames) { if (Get-Command $name -ErrorAction SilentlyContinue) { return $true } }",
@@ -939,7 +897,6 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "  foreach ($agent in @('cursor','windsurf','cline','kilocode','antigravity','hermes')) {",
         "    Invoke-RtkInitIfCommand -RtkExe $rtkExe -CommandNames @($agent) -InitArgs @('--agent',$agent)",
         "  }",
-        "  Ensure-GeminiRtkConfig $rtkExe",
         "  $settingsPath = Join-Path $env:USERPROFILE '.claude\\settings.json'",
         "  if (Test-Path -LiteralPath $settingsPath) {",
         "    try {",
@@ -1315,7 +1272,6 @@ update_rtk() {{
   command_exists claude && "$rtk_exe" init -g --auto-patch >/dev/null 2>&1 || true
   command_exists codex && "$rtk_exe" init -g --codex >/dev/null 2>&1 || true
   configure_rtk_supported_agents "$rtk_exe"
-  command_exists gemini && "$rtk_exe" init -g --gemini >/dev/null 2>&1 || true
 }}
 update_rtk
 """
@@ -2410,6 +2366,362 @@ def ensure_ollama_via_winget(log: Callable[[str], None]) -> tuple[bool, Optional
     return (True, package_name)
 
 
+def _windows_app_install_folder_names(spec: CliSpec) -> list[str]:
+    return {
+        "vscode": ["Microsoft VS Code"],
+        "antigravity": ["Antigravity"],
+    }.get(spec.key, [])
+
+
+def _macos_app_bundle_name(spec: CliSpec) -> Optional[str]:
+    return {
+        "vscode": "Visual Studio Code",
+        "antigravity": "Antigravity",
+    }.get(spec.key)
+
+
+def _antigravity_linux_install_root() -> str:
+    if is_admin():
+        return "/opt/antigravity"
+    return os.path.join(os.path.expanduser("~"), ".local", "opt", "antigravity")
+
+
+def _vscode_linux_install_root() -> str:
+    if is_admin():
+        return "/opt/visual-studio-code"
+    return os.path.join(os.path.expanduser("~"), ".local", "opt", "visual-studio-code")
+
+
+def _linux_user_bin_dir() -> str:
+    if is_admin():
+        return "/usr/local/bin"
+    return os.path.join(os.path.expanduser("~"), ".local", "bin")
+
+
+def get_app_cli_bin_dirs(spec: CliSpec, log: Callable[[str], None]) -> list[str]:
+    """Directories that may contain the editor's CLI shim after install."""
+    del log  # kept for call-shape consistency with the other *_bin_dirs helpers
+    dirs: list[str] = []
+    if is_windows():
+        local_app = os.environ.get("LocalAppData")
+        program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+        program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+        for folder in _windows_app_install_folder_names(spec):
+            roots = []
+            if local_app:
+                roots.append(os.path.join(local_app, "Programs", folder))
+            roots.append(os.path.join(program_files, folder))
+            roots.append(os.path.join(program_files_x86, folder))
+            for root in roots:
+                dirs.append(os.path.join(root, "bin"))
+    elif is_linux():
+        home = os.path.expanduser("~")
+        dirs.extend(["/usr/local/bin", "/usr/bin", os.path.join(home, ".local", "bin")])
+        if spec.linux_install_kind == "antigravity_tarball":
+            dirs.append(os.path.join(_antigravity_linux_install_root(), "bin"))
+        elif spec.linux_install_kind == "vscode_pkg":
+            dirs.append(os.path.join(_vscode_linux_install_root(), "bin"))
+    else:
+        dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"])
+        bundle = _macos_app_bundle_name(spec)
+        if bundle:
+            dirs.append(f"/Applications/{bundle}.app/Contents/Resources/app/bin")
+
+    existing_dirs = [d for d in dirs if d and os.path.isdir(d)]
+    unique: list[str] = []
+    seen: set[str] = set()
+    for d in existing_dirs:
+        norm = normalize_path_for_compare(d)
+        if norm not in seen:
+            unique.append(d)
+            seen.add(norm)
+    return unique
+
+
+def ensure_cli_via_winget(spec: CliSpec, log: Callable[[str], None]) -> tuple[bool, Optional[str]]:
+    """Install/upgrade an IDE-style CLI via winget on Windows."""
+    winget = find_winget()
+    if not winget:
+        err = (
+            "winget was not found. Install Microsoft App Installer / winget first to install "
+            + spec.label
+            + "."
+        )
+        log(err)
+        return (False, err)
+
+    package_name = spec.winget_id or (spec.package_candidates[0] if spec.package_candidates else "")
+    common = [
+        "-e",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--silent",
+        "--disable-interactivity",
+    ]
+    source = ["--source", spec.winget_source] if spec.winget_source else []
+    install_args = [winget, "install", "--id", package_name, *common, *source]
+    upgrade_args = [winget, "upgrade", "--id", package_name, *common, *source]
+
+    log(f"Installing {spec.label} for Windows via winget ({package_name})...")
+    code = run_command(install_args, log)
+    if code != 0:
+        log(
+            f"winget install for {spec.label} failed with exit code "
+            + format_exit_code(code)
+            + "; trying winget upgrade..."
+        )
+        code = run_command(upgrade_args, log)
+        if code != 0:
+            existing = resolve_command_path(spec.command_candidates, get_app_cli_bin_dirs(spec, log))
+            if existing:
+                log(
+                    f"Warning: {spec.label} install/update failed, but an existing install was found "
+                    f"at {existing}. Using existing installation and continuing."
+                )
+                return (True, package_name)
+            err = f"{package_name} failed with exit code {format_exit_code(code)}"
+            log(err)
+            return (False, err)
+
+    return (True, package_name)
+
+
+def select_latest_antigravity_prefix(prefixes: list[str]) -> Optional[str]:
+    """Pick the newest real `antigravity-hub/<version>-<build>/` directory from
+    a Google Cloud Storage prefix listing. Skips non-numeric (e.g. `dogfood`)
+    and the `100.0.0` canary sentinel."""
+    best: Optional[str] = None
+    best_key: Optional[tuple[tuple[int, int, int], int]] = None
+    for prefix in prefixes:
+        rel = prefix
+        if rel.startswith(ANTIGRAVITY_GCS_PREFIX):
+            rel = rel[len(ANTIGRAVITY_GCS_PREFIX):]
+        rel = rel.strip("/")
+        if "-" not in rel:
+            continue
+        ver_str, _, build_str = rel.partition("-")
+        parts = ver_str.split(".")
+        if len(parts) != 3 or not all(p.isdigit() for p in parts) or not build_str.isdigit():
+            continue
+        version = (int(parts[0]), int(parts[1]), int(parts[2]))
+        if version[0] >= 100:
+            continue
+        key = (version, int(build_str))
+        if best_key is None or key > best_key:
+            best_key = key
+            best = prefix if prefix.endswith("/") else prefix + "/"
+    return best
+
+
+def resolve_latest_antigravity_tarball_url(log: Callable[[str], None]) -> Optional[str]:
+    completed = _probe_command(["curl", "-fsSL", ANTIGRAVITY_GCS_LIST_URL])
+    if not completed or completed.returncode != 0 or not completed.stdout:
+        log("Warning: could not list the Antigravity download bucket.")
+        return None
+    try:
+        data = json.loads(completed.stdout)
+    except ValueError:
+        log("Warning: could not parse the Antigravity bucket listing.")
+        return None
+    prefixes = data.get("prefixes") if isinstance(data, dict) else None
+    chosen = select_latest_antigravity_prefix(prefixes or [])
+    if not chosen:
+        log("Warning: no Antigravity release directory was found in the bucket listing.")
+        return None
+    return ANTIGRAVITY_GCS_OBJECT_BASE + chosen + ANTIGRAVITY_LINUX_TARBALL_NAME
+
+
+def _find_app_launcher(root: str, cmd: str) -> Optional[str]:
+    """Locate the CLI launcher named `cmd` inside an extracted archive,
+    preferring one whose parent directory is `bin`."""
+    matches: list[str] = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        if cmd in filenames:
+            matches.append(os.path.join(dirpath, cmd))
+    for match in matches:
+        if os.path.basename(os.path.dirname(match)) == "bin":
+            return match
+    return matches[0] if matches else None
+
+
+def _install_tarball_app_linux(
+    url: str,
+    install_root: str,
+    cmd: str,
+    label: str,
+    log: Callable[[str], None],
+) -> tuple[bool, Optional[str]]:
+    """Download a .tar.gz editor build, install it under install_root, and
+    symlink its CLI launcher onto PATH. Used for Antigravity (always) and as
+    the VS Code fallback on non-deb/-rpm distros."""
+    if not command_exists("tar"):
+        return (False, "tar was not found; cannot extract the Linux archive.")
+    tmpdir = tempfile.mkdtemp(prefix="installthecli-")
+    try:
+        archive = os.path.join(tmpdir, "app.tar.gz")
+        log(f"Downloading {label} for Linux from {url}")
+        code = run_command(["curl", "-fsSL", "-o", archive, url], log)
+        if code != 0:
+            return (False, f"{label} download failed with exit code {format_exit_code(code)}")
+        extract_dir = os.path.join(tmpdir, "extract")
+        os.makedirs(extract_dir, exist_ok=True)
+        code = run_command(["tar", "-xzf", archive, "-C", extract_dir], log)
+        if code != 0:
+            return (False, f"{label} archive extraction failed with exit code {format_exit_code(code)}")
+
+        launcher = _find_app_launcher(extract_dir, cmd)
+        if not launcher:
+            return (False, f"{label} archive did not contain a '{cmd}' launcher.")
+        entries = [os.path.join(extract_dir, e) for e in os.listdir(extract_dir)]
+        sub_dirs = [e for e in entries if os.path.isdir(e)]
+        app_root = sub_dirs[0] if len(sub_dirs) == 1 else extract_dir
+        launcher_rel = os.path.relpath(launcher, app_root)
+
+        sudo = _linux_sudo()
+        parent = os.path.dirname(install_root)
+        run_command([*sudo, "mkdir", "-p", parent], log)
+        run_command([*sudo, "rm", "-rf", install_root], log)
+        code = run_command([*sudo, "cp", "-a", app_root, install_root], log)
+        if code != 0:
+            return (False, f"Could not install {label} into {install_root} (exit {format_exit_code(code)}).")
+
+        bin_dir = _linux_user_bin_dir()
+        run_command([*sudo, "mkdir", "-p", bin_dir], log)
+        target_exe = os.path.join(install_root, launcher_rel)
+        run_command([*sudo, "chmod", "+x", target_exe], log)
+        link_path = os.path.join(bin_dir, cmd)
+        code = run_command([*sudo, "ln", "-sf", target_exe, link_path], log)
+        if code != 0:
+            return (False, f"Could not symlink {label} CLI into {bin_dir} (exit {format_exit_code(code)}).")
+        log(f"Installed {label} to {install_root} and linked '{cmd}' into {bin_dir}.")
+        return (True, install_root)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def install_antigravity_linux(log: Callable[[str], None]) -> tuple[bool, Optional[str]]:
+    if not command_exists("curl"):
+        try:
+            ensure_linux_packages_installed(["curl"], log)
+        except RuntimeError as exc:
+            err = str(exc)
+            log(err)
+            return (False, err)
+    url = resolve_latest_antigravity_tarball_url(log)
+    if not url:
+        return (False, "Could not resolve the latest Antigravity Linux download URL.")
+    ok, detail = _install_tarball_app_linux(url, _antigravity_linux_install_root(), "antigravity", "Antigravity", log)
+    if ok:
+        return (True, ANTIGRAVITY_WINGET_ID)
+    return (False, detail)
+
+
+def install_vscode_linux(log: Callable[[str], None]) -> tuple[bool, Optional[str]]:
+    if not command_exists("curl"):
+        try:
+            ensure_linux_packages_installed(["curl"], log)
+        except RuntimeError as exc:
+            err = str(exc)
+            log(err)
+            return (False, err)
+
+    family = detect_linux_distro_family()
+    if family in ("debian", "fedora"):
+        if not ensure_linux_root_for_package_installs(log):
+            return (False, "Visual Studio Code install requires root privileges on this distribution.")
+        tmpdir = tempfile.mkdtemp(prefix="installthecli-")
+        try:
+            if family == "debian":
+                pkg = os.path.join(tmpdir, "code.deb")
+                url = VSCODE_LINUX_DEB_URL
+                install_cmds = [[*_linux_sudo(), "apt-get", "install", "-y", pkg]]
+            else:
+                pkg = os.path.join(tmpdir, "code.rpm")
+                url = VSCODE_LINUX_RPM_URL
+                install_cmds = [[*_linux_sudo(), "dnf", "install", "-y", pkg]]
+            log(f"Downloading Visual Studio Code for Linux from {url}")
+            code = run_command(["curl", "-fsSL", "-L", "-o", pkg, url], log)
+            if code != 0:
+                return (False, f"Visual Studio Code download failed with exit code {format_exit_code(code)}")
+            for args in install_cmds:
+                code = run_command(args, log)
+                if code != 0:
+                    return (False, f"Visual Studio Code install failed with exit code {format_exit_code(code)}")
+            return (True, VSCODE_WINGET_ID)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # Arch / unsupported package managers: fall back to the official tarball.
+    ok, detail = _install_tarball_app_linux(VSCODE_LINUX_TARBALL_URL, _vscode_linux_install_root(), "code", "Visual Studio Code", log)
+    if ok:
+        return (True, VSCODE_WINGET_ID)
+    return (False, detail)
+
+
+def ensure_app_cli(spec: CliSpec, log: Callable[[str], None]) -> tuple[bool, Optional[str]]:
+    """Install an IDE-style CLI (Antigravity, VS Code) on the current platform."""
+    if is_windows():
+        return ensure_cli_via_winget(spec, log)
+    if is_linux():
+        if spec.linux_install_kind == "antigravity_tarball":
+            return install_antigravity_linux(log)
+        if spec.linux_install_kind == "vscode_pkg":
+            return install_vscode_linux(log)
+        return (False, f"No Linux installer is configured for {spec.label}.")
+    if spec.macos_brew_cask:
+        return brew_install_or_upgrade(spec.macos_brew_cask, log, cask=True)
+    return (False, f"No macOS installer is configured for {spec.label}.")
+
+
+def uninstall_app_cli(spec: CliSpec, log: Callable[[str], None]) -> tuple[bool, Optional[str]]:
+    if is_windows():
+        winget = find_winget()
+        if not winget:
+            err = f"winget was not found. Cannot uninstall {spec.label} automatically."
+            log(err)
+            return (False, err)
+        package_name = spec.winget_id or (spec.package_candidates[0] if spec.package_candidates else "")
+        args = [
+            winget,
+            "uninstall",
+            "--id",
+            package_name,
+            "-e",
+            "--accept-source-agreements",
+            "--silent",
+            "--disable-interactivity",
+        ]
+        if spec.winget_source:
+            args += ["--source", spec.winget_source]
+        code = run_command(args, log)
+        if code != 0 and resolve_command_path(spec.command_candidates, get_app_cli_bin_dirs(spec, log)):
+            err = f"{package_name} uninstall failed with exit code {format_exit_code(code)}"
+            log(err)
+            return (False, err)
+        return (True, package_name)
+
+    if is_linux():
+        sudo = _linux_sudo()
+        cmd = spec.command_candidates[0] if spec.command_candidates else ""
+        if spec.linux_install_kind == "vscode_pkg":
+            family = detect_linux_distro_family()
+            if family == "debian":
+                run_command([*sudo, "apt-get", "remove", "-y", "code"], log)
+            elif family == "fedora":
+                run_command([*sudo, "dnf", "remove", "-y", "code"], log)
+            install_root = _vscode_linux_install_root()
+        else:
+            install_root = _antigravity_linux_install_root()
+        run_command([*sudo, "rm", "-rf", install_root], log)
+        if cmd:
+            run_command([*sudo, "rm", "-f", os.path.join(_linux_user_bin_dir(), cmd)], log)
+        return (True, spec.winget_id or cmd)
+
+    if spec.macos_brew_cask:
+        return brew_uninstall(spec.macos_brew_cask, log, cask=True)
+    return (True, spec.winget_id)
+
+
 def ensure_python_314_via_winget(log: Callable[[str], None]) -> list[str]:
     python_cmd = find_python_314_command()
     if python_cmd:
@@ -2707,92 +3019,6 @@ def _clear_cargo_git_cache_for(repo_prefix: str, log: Callable[[str], None]) -> 
                 log(f"Warning: could not remove {target}: {exc}")
 
 
-def _write_text_if_changed(path: str, content: str) -> bool:
-    existing: Optional[str]
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            existing = fh.read()
-    except FileNotFoundError:
-        existing = None
-    if existing == content:
-        return False
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(content)
-    return True
-
-
-def _ensure_markdown_import(path: str, import_line: str) -> bool:
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            content = fh.read()
-    except FileNotFoundError:
-        _write_text_if_changed(path, import_line + "\n")
-        return True
-    if any(line.strip() == import_line for line in content.splitlines()):
-        return False
-    return _write_text_if_changed(path, import_line + "\n\n" + content)
-
-
-def _ensure_gemini_rtk_config(rtk_exe: str, log: Callable[[str], None]) -> None:
-    if not shutil.which("gemini"):
-        return
-    gemini_dir = os.path.join(os.path.expanduser("~"), ".gemini")
-    rtk_md_path = os.path.join(gemini_dir, "RTK.md")
-    gemini_md_path = os.path.join(gemini_dir, "GEMINI.md")
-    settings_path = os.path.join(gemini_dir, "settings.json")
-
-    try:
-        if _write_text_if_changed(rtk_md_path, RTK_GEMINI_MD):
-            log(f"Updated Gemini RTK instructions at {rtk_md_path}")
-        if _ensure_markdown_import(gemini_md_path, "@RTK.md"):
-            log(f"Ensured Gemini imports RTK.md at {gemini_md_path}")
-
-        try:
-            with open(settings_path, "r", encoding="utf-8") as fh:
-                settings = json.load(fh)
-        except FileNotFoundError:
-            settings = {}
-        except ValueError as exc:
-            log(f"Warning: could not parse {settings_path}: {exc}")
-            return
-
-        hooks = settings.setdefault("hooks", {})
-        before_tool = hooks.setdefault("BeforeTool", [])
-        rtk_pattern = re.compile(r"rtk(\.exe)?\s+hook\s+gemini")
-        kept: list[dict] = []
-        for entry in before_tool:
-            entry_hooks = entry.get("hooks", []) if isinstance(entry, dict) else []
-            has_rtk_gemini = any(
-                h.get("type") == "command" and rtk_pattern.search(str(h.get("command", "")))
-                for h in entry_hooks
-                if isinstance(h, dict)
-            )
-            if isinstance(entry, dict) and entry.get("matcher") == "run_shell_command" and has_rtk_gemini:
-                continue
-            kept.append(entry)
-        kept.append(
-            {
-                "matcher": "run_shell_command",
-                "hooks": [
-                    {
-                        "name": "rtk-gemini-shell-prefix",
-                        "type": "command",
-                        "command": f"{rtk_exe} hook gemini",
-                    }
-                ],
-            }
-        )
-        hooks["BeforeTool"] = kept
-        os.makedirs(gemini_dir, exist_ok=True)
-        with open(settings_path, "w", encoding="utf-8", newline="\n") as fh:
-            json.dump(settings, fh, indent=2)
-            fh.write("\n")
-        log("Registered rtk hook for Gemini CLI")
-    except OSError as exc:
-        log(f"Warning: could not configure Gemini RTK hook: {exc}")
-
-
 def _has_any_command(command_names: tuple[str, ...]) -> bool:
     return any(shutil.which(command_name) for command_name in command_names)
 
@@ -2810,7 +3036,6 @@ def _configure_rtk_for_installed_ais(rtk_exe: str, log: Callable[[str], None]) -
         if _has_any_command(command_names):
             log(f"Registering rtk for {label}")
             run_command([rtk_exe, "init", "-g", *init_args], log)
-    _ensure_gemini_rtk_config(rtk_exe, log)
 
 
 def try_install_rtk(
@@ -4557,7 +4782,10 @@ class InstallerFrame(wx.Frame):
             self.log("No CLI tools selected for uninstall.")
             return
 
-        needs_npm = any(spec.key not in ("mistral", "ollama") for spec in selected) and not is_macos()
+        needs_npm = (
+            any(spec.key not in ("mistral", "ollama") and not cli_is_app_installer(spec) for spec in selected)
+            and not is_macos()
+        )
         npm_exe: Optional[str] = None
         if needs_npm:
             self.set_status("Locating npm")
@@ -4589,6 +4817,8 @@ class InstallerFrame(wx.Frame):
                 success, detail = try_uninstall_ollama(self.log)
             elif spec.key == "rtk":
                 success, detail = try_uninstall_rtk(spec, self.log)
+            elif cli_is_app_installer(spec):
+                success, detail = uninstall_app_cli(spec, self.log)
             else:
                 assert npm_exe is not None
                 success, detail = try_uninstall_package_candidates(npm_exe, spec, self.log)
@@ -4601,7 +4831,7 @@ class InstallerFrame(wx.Frame):
 
             self.log(f"Uninstall completed for {spec.label}.")
             remove_cli_desktop_shortcuts(spec, self.log)
-            if spec.key not in ("mistral", "ollama", "rtk"):
+            if spec.key not in ("mistral", "ollama", "rtk") and not cli_is_app_installer(spec):
                 removed_npm_packages.extend(spec.package_candidates)
 
         if removed_npm_packages and is_windows():
@@ -4631,6 +4861,12 @@ class InstallerFrame(wx.Frame):
         needs_python_cli_dirs = any(spec.key == "mistral" for spec in selected)
         needs_ollama_cli_dirs = any(spec.key == "ollama" for spec in selected)
         needs_rtk_cli_dirs = any(spec.key == "rtk" for spec in selected)
+        app_cli_specs = [spec for spec in selected if cli_is_app_installer(spec)]
+
+        def _augment_app_cli_dirs(dirs: list[str]) -> list[str]:
+            for app_spec in app_cli_specs:
+                dirs = dedupe_preserve_order(dirs + get_app_cli_bin_dirs(app_spec, self.log))
+            return dirs
 
         self.set_status("Checking/installing requirements")
         self.set_gauge(5)
@@ -4670,6 +4906,7 @@ class InstallerFrame(wx.Frame):
             cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_ollama_cli_bin_dirs(self.log))
         if needs_rtk_cli_dirs:
             cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_rtk_cli_bin_dirs(self.log))
+        cli_bin_dirs = _augment_app_cli_dirs(cli_bin_dirs)
         self.log("PATH directories to ensure: " + (", ".join(cli_bin_dirs) if cli_bin_dirs else "(none found yet)"))
 
         self.set_status("Updating user/system PATH")
@@ -4715,6 +4952,8 @@ class InstallerFrame(wx.Frame):
                 success, pkg = ensure_ollama_via_winget(self.log)
             elif spec.key == "rtk":
                 success, pkg = try_install_rtk(spec, self.log)
+            elif cli_is_app_installer(spec):
+                success, pkg = ensure_app_cli(spec, self.log)
             else:
                 success, pkg = try_install_package_candidates(npm_exe, spec, self.log)
             if not success:
@@ -4738,7 +4977,7 @@ class InstallerFrame(wx.Frame):
 
             assert pkg is not None
             self.log(f"Installed {spec.label} using package {pkg}")
-            if not is_macos() and spec.key not in ("mistral", "ollama", "rtk"):
+            if not is_macos() and spec.key not in ("mistral", "ollama", "rtk") and not cli_is_app_installer(spec):
                 installed_packages.append(pkg)
 
             cli_bin_dirs = get_cli_bin_dirs(npm_exe, self.log)
@@ -4748,6 +4987,8 @@ class InstallerFrame(wx.Frame):
                 cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_ollama_cli_bin_dirs(self.log))
             if spec.key == "rtk":
                 cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_rtk_cli_bin_dirs(self.log))
+            if cli_is_app_installer(spec):
+                cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_app_cli_bin_dirs(spec, self.log))
             command_path = resolve_command_path(spec.command_candidates, cli_bin_dirs)
             if command_path:
                 self.log(f"Resolved command path for {spec.label}: {command_path}")
@@ -4764,6 +5005,7 @@ class InstallerFrame(wx.Frame):
             cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_ollama_cli_bin_dirs(self.log))
         if needs_rtk_cli_dirs:
             cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_rtk_cli_bin_dirs(self.log))
+        cli_bin_dirs = _augment_app_cli_dirs(cli_bin_dirs)
         added_user, user_err = add_dirs_to_path("user", cli_bin_dirs)
         if user_err:
             self.log(f"User PATH refresh warning: {user_err}")

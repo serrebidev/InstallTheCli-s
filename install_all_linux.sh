@@ -10,6 +10,13 @@ SUBCOMMAND="install-all"
 TARGET="all"
 
 OLLAMA_INSTALL_URL="https://ollama.com/install.sh"
+ANTIGRAVITY_GCS_LIST_URL="https://storage.googleapis.com/storage/v1/b/antigravity-public/o?prefix=antigravity-hub/&delimiter=/"
+ANTIGRAVITY_GCS_BASE="https://storage.googleapis.com/antigravity-public/"
+ANTIGRAVITY_INSTALL_DIR="/opt/antigravity"
+VSCODE_DEB_URL="https://code.visualstudio.com/sha/download?build=stable&os=linux-deb-x64"
+VSCODE_RPM_URL="https://code.visualstudio.com/sha/download?build=stable&os=linux-rpm-x64"
+VSCODE_TARBALL_URL="https://code.visualstudio.com/sha/download?build=stable&os=linux-x64"
+VSCODE_INSTALL_DIR="/opt/visual-studio-code"
 UPDATE_SCRIPT_PATH="/usr/local/bin/installthecli-linux-update.sh"
 CRON_FILE_PATH="/etc/cron.d/installthecli-ai-cli-updates"
 UPDATE_LOG_PATH="/var/log/installthecli-linux-update.log"
@@ -56,10 +63,12 @@ Options:
 
 This script installs:
   - Node.js + npm (distro package manager)
-  - Claude CLI, Codex CLI, Gemini CLI, Grok CLI, Qwen CLI, GitHub Copilot CLI,
+  - Claude CLI, Codex CLI, Grok CLI, Qwen CLI, GitHub Copilot CLI,
     OpenClaw CLI, IronClaw CLI (npm)
   - Mistral Vibe CLI (Python 3.12+ + pip/uv)
   - Ollama (official install script)
+  - Antigravity (official tar.gz from antigravity.google) and Visual Studio Code
+    (official .deb/.rpm/tar.gz from code.visualstudio.com)
   - RTK (Rust Token Killer) from git master via cargo (opt-in: 'install rtk')
   - Cron updater (@reboot and daily) unless --no-cron is used
 EOF
@@ -70,7 +79,8 @@ print_targets() {
 Supported targets:
   claude
   codex
-  gemini
+  antigravity
+  vscode
   grok
   qwen
   copilot
@@ -310,7 +320,6 @@ install_npm_cli() {
 install_all_npm_clis() {
   install_npm_cli "Claude CLI" "@anthropic-ai/claude-code"
   install_npm_cli "Codex CLI" "@openai/codex"
-  install_npm_cli "Gemini CLI" "@google/gemini-cli"
   install_npm_cli "Grok CLI (Vibe Kit)" "@vibe-kit/grok-cli"
   install_npm_cli "Qwen CLI" "@qwen-code/qwen-code" "qwen-code"
   install_npm_cli "GitHub Copilot CLI" "@github/copilot" "@githubnext/github-copilot-cli"
@@ -323,7 +332,6 @@ install_npm_target() {
   case "$target" in
     claude) install_npm_cli "Claude CLI" "@anthropic-ai/claude-code" ;;
     codex) install_npm_cli "Codex CLI" "@openai/codex" ;;
-    gemini) install_npm_cli "Gemini CLI" "@google/gemini-cli" ;;
     grok) install_npm_cli "Grok CLI (Vibe Kit)" "@vibe-kit/grok-cli" ;;
     qwen) install_npm_cli "Qwen CLI" "@qwen-code/qwen-code" "qwen-code" ;;
     copilot) install_npm_cli "GitHub Copilot CLI" "@github/copilot" "@githubnext/github-copilot-cli" ;;
@@ -372,6 +380,131 @@ install_ollama_official() {
   fi
 }
 
+# Resolve the newest Antigravity Linux tarball URL by listing the public Google
+# Cloud Storage bucket (there is no stable "latest" alias). Skips non-numeric
+# (e.g. dogfood) prefixes and the 100.0.0 canary sentinel. Prints the URL.
+resolve_antigravity_tarball_url() {
+  command_exists curl || install_linux_packages curl
+  command_exists python3 || install_linux_packages python3
+  local listing
+  listing="$(curl -fsSL "$ANTIGRAVITY_GCS_LIST_URL" 2>/dev/null)" || return 1
+  local prefix
+  prefix="$(printf '%s' "$listing" | python3 - <<'PY'
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+best = None
+best_key = None
+for p in data.get("prefixes", []):
+    rel = p[len("antigravity-hub/"):] if p.startswith("antigravity-hub/") else p
+    rel = rel.strip("/")
+    if "-" not in rel:
+        continue
+    ver, _, build = rel.partition("-")
+    parts = ver.split(".")
+    if len(parts) != 3 or not all(x.isdigit() for x in parts) or not build.isdigit():
+        continue
+    v = tuple(int(x) for x in parts)
+    if v[0] >= 100:
+        continue
+    key = (v, int(build))
+    if best_key is None or key > best_key:
+        best_key = key
+        best = p if p.endswith("/") else p + "/"
+print(best or "")
+PY
+)" || return 1
+  [[ -n "$prefix" ]] || return 1
+  printf '%s%slinux-x64/Antigravity.tar.gz\n' "$ANTIGRAVITY_GCS_BASE" "$prefix"
+}
+
+install_antigravity_linux() {
+  if (( DRY_RUN )); then
+    log "[dry-run] resolve latest Antigravity tarball from ${ANTIGRAVITY_GCS_LIST_URL}"
+    log "[dry-run] download + extract to ${ANTIGRAVITY_INSTALL_DIR} and symlink antigravity into /usr/local/bin"
+    return 0
+  fi
+  command_exists curl || install_linux_packages curl
+  command_exists tar || install_linux_packages tar
+  local url
+  url="$(resolve_antigravity_tarball_url)" || die "Could not resolve the latest Antigravity Linux download URL."
+  log "Downloading Antigravity from ${url}"
+  local tmp
+  tmp="$(mktemp -d)"
+  curl -fsSL -o "${tmp}/antigravity.tar.gz" "$url" || { rm -rf "$tmp"; die "Antigravity download failed."; }
+  mkdir -p "${tmp}/x"
+  tar -xzf "${tmp}/antigravity.tar.gz" -C "${tmp}/x" || { rm -rf "$tmp"; die "Antigravity extraction failed."; }
+  local launcher
+  launcher="$(find "${tmp}/x" -type f -name antigravity -path '*/bin/antigravity' 2>/dev/null | head -n1)"
+  [[ -n "$launcher" ]] || launcher="$(find "${tmp}/x" -type f -name antigravity 2>/dev/null | head -n1)"
+  [[ -n "$launcher" ]] || { rm -rf "$tmp"; die "Antigravity archive did not contain an 'antigravity' launcher."; }
+  local app_root
+  app_root="$(find "${tmp}/x" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+  [[ -n "$app_root" ]] || app_root="${tmp}/x"
+  local rel="${launcher#"${app_root}"/}"
+  rm -rf "$ANTIGRAVITY_INSTALL_DIR"
+  cp -a "$app_root" "$ANTIGRAVITY_INSTALL_DIR"
+  chmod +x "${ANTIGRAVITY_INSTALL_DIR}/${rel}" 2>/dev/null || true
+  ln -sf "${ANTIGRAVITY_INSTALL_DIR}/${rel}" /usr/local/bin/antigravity
+  rm -rf "$tmp"
+  log "Installed Antigravity to ${ANTIGRAVITY_INSTALL_DIR} and linked antigravity into /usr/local/bin."
+}
+
+install_vscode_linux() {
+  case "$DISTRO_FAMILY" in
+    debian)
+      if (( DRY_RUN )); then
+        log "[dry-run] download ${VSCODE_DEB_URL} and apt-get install -y the .deb"
+        return 0
+      fi
+      command_exists curl || install_linux_packages curl
+      local tmp
+      tmp="$(mktemp -d)"
+      curl -fsSL -L -o "${tmp}/code.deb" "$VSCODE_DEB_URL" || { rm -rf "$tmp"; die "Visual Studio Code download failed."; }
+      run_cmd apt-get install -y "${tmp}/code.deb"
+      rm -rf "$tmp"
+      ;;
+    fedora)
+      if (( DRY_RUN )); then
+        log "[dry-run] download ${VSCODE_RPM_URL} and dnf install -y the .rpm"
+        return 0
+      fi
+      command_exists curl || install_linux_packages curl
+      local tmp
+      tmp="$(mktemp -d)"
+      curl -fsSL -L -o "${tmp}/code.rpm" "$VSCODE_RPM_URL" || { rm -rf "$tmp"; die "Visual Studio Code download failed."; }
+      run_cmd dnf install -y "${tmp}/code.rpm"
+      rm -rf "$tmp"
+      ;;
+    *)
+      # Arch and other families: install the official stable tarball under /opt.
+      if (( DRY_RUN )); then
+        log "[dry-run] download ${VSCODE_TARBALL_URL}, extract to ${VSCODE_INSTALL_DIR}, symlink code"
+        return 0
+      fi
+      command_exists curl || install_linux_packages curl
+      command_exists tar || install_linux_packages tar
+      local tmp
+      tmp="$(mktemp -d)"
+      curl -fsSL -L -o "${tmp}/code.tgz" "$VSCODE_TARBALL_URL" || { rm -rf "$tmp"; die "Visual Studio Code download failed."; }
+      mkdir -p "${tmp}/x"
+      tar -xzf "${tmp}/code.tgz" -C "${tmp}/x" || { rm -rf "$tmp"; die "Visual Studio Code extraction failed."; }
+      local app_root
+      app_root="$(find "${tmp}/x" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+      [[ -n "$app_root" ]] || { rm -rf "$tmp"; die "Visual Studio Code archive layout was unexpected."; }
+      rm -rf "$VSCODE_INSTALL_DIR"
+      cp -a "$app_root" "$VSCODE_INSTALL_DIR"
+      ln -sf "${VSCODE_INSTALL_DIR}/bin/code" /usr/local/bin/code
+      rm -rf "$tmp"
+      ;;
+  esac
+  if command_exists code; then
+    log "Visual Studio Code CLI available: $(command -v code)"
+  fi
+}
+
 # Install rustup + cargo if missing. Uses the official rustup-init script with
 # --default-toolchain stable --profile minimal so we get just enough Rust to
 # `cargo install` rtk.
@@ -395,112 +528,6 @@ ensure_rust_toolchain() {
   if (( ! DRY_RUN )) && ! command_exists cargo; then
     die "cargo not found after rustup install. Open a new shell and rerun."
   fi
-}
-
-configure_rtk_gemini() {
-  local rtk_bin="$1"
-  command_exists gemini || return 0
-  local gemini_dir="${HOME:-/root}/.gemini"
-  mkdir -p "$gemini_dir"
-  cat > "${gemini_dir}/RTK.md" <<'EOF'
-# RTK - Rust Token Killer (Gemini CLI)
-
-**Usage**: Token-optimized CLI proxy for shell commands.
-
-## Rule
-
-Always prefix shell commands with `rtk`.
-
-Examples:
-
-```bash
-rtk git status
-rtk cargo test
-rtk npm run build
-rtk pytest -q
-```
-
-## Hook-Based Usage
-
-Shell commands are automatically rewritten by the Gemini CLI `BeforeTool` hook.
-Example: `git status` -> `rtk git status` (transparent, 0 tokens overhead)
-
-## Meta Commands
-
-```bash
-rtk gain            # Token savings analytics
-rtk gain --history  # Recent command savings history
-rtk proxy <cmd>     # Run raw command without filtering
-```
-
-## Verification
-
-```bash
-rtk --version
-rtk gain
-which rtk
-```
-EOF
-
-  if [[ ! -f "${gemini_dir}/GEMINI.md" ]]; then
-    printf '%s\n' '@RTK.md' > "${gemini_dir}/GEMINI.md"
-  elif ! grep -Fxq '@RTK.md' "${gemini_dir}/GEMINI.md"; then
-    local tmp
-    tmp="$(mktemp)"
-    printf '%s\n\n' '@RTK.md' > "$tmp"
-    cat "${gemini_dir}/GEMINI.md" >> "$tmp"
-    mv "$tmp" "${gemini_dir}/GEMINI.md"
-  fi
-
-  if command_exists python3; then
-    python3 - "${gemini_dir}/settings.json" "$rtk_bin" <<'PY'
-import json
-import os
-import re
-import sys
-
-settings_path, rtk_bin = sys.argv[1:3]
-try:
-    with open(settings_path, "r", encoding="utf-8") as fh:
-        settings = json.load(fh)
-except FileNotFoundError:
-    settings = {}
-except json.JSONDecodeError:
-    raise SystemExit(0)
-
-hooks = settings.setdefault("hooks", {})
-before_tool = hooks.setdefault("BeforeTool", [])
-pattern = re.compile(r"rtk(\.exe)?\s+hook\s+gemini")
-kept = []
-for entry in before_tool:
-    entry_hooks = entry.get("hooks", []) if isinstance(entry, dict) else []
-    has_rtk = any(
-        isinstance(h, dict)
-        and h.get("type") == "command"
-        and pattern.search(str(h.get("command", "")))
-        for h in entry_hooks
-    )
-    if isinstance(entry, dict) and entry.get("matcher") == "run_shell_command" and has_rtk:
-        continue
-    kept.append(entry)
-kept.append({
-    "matcher": "run_shell_command",
-    "hooks": [{
-        "name": "rtk-gemini-shell-prefix",
-        "type": "command",
-        "command": f"{rtk_bin} hook gemini",
-    }],
-})
-hooks["BeforeTool"] = kept
-os.makedirs(os.path.dirname(settings_path), exist_ok=True)
-with open(settings_path, "w", encoding="utf-8", newline="\n") as fh:
-    json.dump(settings, fh, indent=2)
-    fh.write("\n")
-PY
-  else
-    "$rtk_bin" init -g --gemini || warn "rtk init (Gemini) failed"
-  fi
-  log "Registered rtk hook for Gemini CLI"
 }
 
 rtk_has_any_command() {
@@ -541,7 +568,6 @@ configure_rtk_integrations() {
     "$rtk_bin" init -g --codex || warn "rtk init (Codex) failed"
   fi
   configure_rtk_supported_agents "$rtk_bin"
-  configure_rtk_gemini "$rtk_bin"
 }
 
 # Install rtk-ai/rtk from git master via `cargo install`. The cargo git
@@ -584,6 +610,8 @@ install_all_targets() {
   install_all_npm_clis
   install_mistral_vibe
   install_ollama_official
+  install_antigravity_linux
+  install_vscode_linux
 }
 
 install_single_target() {
@@ -598,10 +626,16 @@ install_single_target() {
     ollama)
       install_ollama_official
       ;;
+    antigravity|agy)
+      install_antigravity_linux
+      ;;
+    vscode|code)
+      install_vscode_linux
+      ;;
     rtk)
       install_rtk
       ;;
-    claude|codex|gemini|grok|qwen|copilot|openclaw|ironclaw)
+    claude|codex|grok|qwen|copilot|openclaw|ironclaw)
       install_npm_target "$target_key"
       ;;
     *)
@@ -667,7 +701,6 @@ update_npm_all() {
   fi
   update_npm_cli "Claude CLI" "@anthropic-ai/claude-code"
   update_npm_cli "Codex CLI" "@openai/codex"
-  update_npm_cli "Gemini CLI" "@google/gemini-cli"
   update_npm_cli "Grok CLI (Vibe Kit)" "@vibe-kit/grok-cli"
   update_npm_cli "Qwen CLI" "@qwen-code/qwen-code" "qwen-code"
   update_npm_cli "GitHub Copilot CLI" "@github/copilot" "@githubnext/github-copilot-cli"
@@ -728,93 +761,6 @@ update_ollama() {
   run_shell "curl -fsSL ${OLLAMA_INSTALL_URL} | sh" || true
 }
 
-configure_rtk_gemini() {
-  local rtk_bin="$1"
-  command_exists gemini || return 0
-  local gemini_dir="${HOME:-/root}/.gemini"
-  mkdir -p "$gemini_dir"
-  cat > "${gemini_dir}/RTK.md" <<'RTKMD'
-# RTK - Rust Token Killer (Gemini CLI)
-
-**Usage**: Token-optimized CLI proxy for shell commands.
-
-## Rule
-
-Always prefix shell commands with `rtk`.
-
-Examples:
-
-```bash
-rtk git status
-rtk cargo test
-rtk npm run build
-rtk pytest -q
-```
-
-## Hook-Based Usage
-
-Shell commands are automatically rewritten by the Gemini CLI `BeforeTool` hook.
-Example: `git status` -> `rtk git status` (transparent, 0 tokens overhead)
-
-## Meta Commands
-
-```bash
-rtk gain            # Token savings analytics
-rtk gain --history  # Recent command savings history
-rtk proxy <cmd>     # Run raw command without filtering
-```
-
-## Verification
-
-```bash
-rtk --version
-rtk gain
-which rtk
-```
-RTKMD
-  if [[ ! -f "${gemini_dir}/GEMINI.md" ]]; then
-    printf '%s\n' '@RTK.md' > "${gemini_dir}/GEMINI.md"
-  elif ! grep -Fxq '@RTK.md' "${gemini_dir}/GEMINI.md"; then
-    local tmp
-    tmp="$(mktemp)"
-    printf '%s\n\n' '@RTK.md' > "$tmp"
-    cat "${gemini_dir}/GEMINI.md" >> "$tmp"
-    mv "$tmp" "${gemini_dir}/GEMINI.md"
-  fi
-  if command_exists python3; then
-    python3 - "${gemini_dir}/settings.json" "$rtk_bin" <<'PY'
-import json, os, re, sys
-settings_path, rtk_bin = sys.argv[1:3]
-try:
-    with open(settings_path, "r", encoding="utf-8") as fh:
-        settings = json.load(fh)
-except FileNotFoundError:
-    settings = {}
-except json.JSONDecodeError:
-    raise SystemExit(0)
-hooks = settings.setdefault("hooks", {})
-before_tool = hooks.setdefault("BeforeTool", [])
-pattern = re.compile(r"rtk(\.exe)?\s+hook\s+gemini")
-kept = []
-for entry in before_tool:
-    entry_hooks = entry.get("hooks", []) if isinstance(entry, dict) else []
-    has_rtk = any(isinstance(h, dict) and h.get("type") == "command" and pattern.search(str(h.get("command", ""))) for h in entry_hooks)
-    if isinstance(entry, dict) and entry.get("matcher") == "run_shell_command" and has_rtk:
-        continue
-    kept.append(entry)
-kept.append({"matcher": "run_shell_command", "hooks": [{"name": "rtk-gemini-shell-prefix", "type": "command", "command": f"{rtk_bin} hook gemini"}]})
-hooks["BeforeTool"] = kept
-os.makedirs(os.path.dirname(settings_path), exist_ok=True)
-with open(settings_path, "w", encoding="utf-8", newline="\n") as fh:
-    json.dump(settings, fh, indent=2)
-    fh.write("\n")
-PY
-  else
-    "$rtk_bin" init -g --gemini >/dev/null 2>&1 || true
-  fi
-  log "Registered rtk hook for Gemini CLI"
-}
-
 rtk_has_any_command() {
   local name
   for name in "$@"; do
@@ -838,7 +784,6 @@ configure_rtk_integrations() {
   command_exists claude && "$rtk_bin" init -g --auto-patch >/dev/null 2>&1 || true
   command_exists codex && "$rtk_bin" init -g --codex >/dev/null 2>&1 || true
   configure_rtk_supported_agents "$rtk_bin"
-  configure_rtk_gemini "$rtk_bin"
 }
 
 # Rebuild rtk from latest git master if it's already installed. Mirrors the
@@ -987,7 +932,7 @@ parse_args() {
     help)
       SUBCOMMAND="help"
       ;;
-    claude|codex|gemini|grok|qwen|copilot|openclaw|ironclaw|mistral|mistral-vibe|vibe|ollama|rtk|all)
+    claude|codex|antigravity|agy|vscode|code|grok|qwen|copilot|openclaw|ironclaw|mistral|mistral-vibe|vibe|ollama|rtk|all)
       # Convenience alias: treat first positional target as "install <target>"
       SUBCOMMAND="install"
       TARGET="${positional[0],,}"
@@ -1056,7 +1001,7 @@ main() {
   if [[ "$SUBCOMMAND" == "setup-cron" ]]; then
     log "Cron updater is configured."
   else
-    log "Open a new shell and run: claude, codex, gemini, grok, qwen, copilot, openclaw, ironclaw, vibe, ollama"
+    log "Open a new shell and run: claude, codex, antigravity, code, grok, qwen, copilot, openclaw, ironclaw, vibe, ollama"
   fi
 }
 

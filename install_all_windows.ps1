@@ -4,8 +4,8 @@ One-click Windows installer for AI CLIs used by InstallTheCli.
 
 .DESCRIPTION
 Installs all supported AI CLIs (or one selected target) using official package sources:
-- winget for Node.js, Python 3.14, and Ollama
-- npm for Claude/Codex/Gemini/Grok/Qwen/Copilot
+- winget for Node.js, Python 3.14, Ollama, Antigravity, and Visual Studio Code
+- npm for Claude/Codex/Grok/Qwen/Copilot
 - uv/pip for Mistral Vibe
 
 Also configures a hidden Scheduled Task (startup, logon, daily) unless disabled.
@@ -14,7 +14,7 @@ Also configures a hidden Scheduled Task (startup, logon, daily) unless disabled.
 Subcommand: install-all (default), install, list, setup-updater, help.
 
 .PARAMETER Target
-Target for the install subcommand: claude, codex, gemini, grok, qwen, copilot, openclaw, ironclaw, mistral, ollama, all.
+Target for the install subcommand: claude, codex, antigravity, vscode, grok, qwen, copilot, openclaw, ironclaw, mistral, ollama, all.
 
 .PARAMETER NoAutoUpdate
 Skips creation/update of the hidden scheduled auto-update task.
@@ -62,6 +62,8 @@ $ErrorActionPreference = 'Stop'
 $NodeWingetId = 'OpenJS.NodeJS.LTS'
 $PythonWingetId = 'Python.Python.3.14'
 $OllamaWingetId = 'Ollama.Ollama'
+$AntigravityWingetId = 'Google.Antigravity'
+$VSCodeWingetId = 'Microsoft.VisualStudioCode'
 $RustupWingetId = 'Rustlang.Rustup'
 $RtkGitUrl = 'https://github.com/rtk-ai/rtk'
 $AutoUpdateTaskName = 'InstallTheCli - Update AI CLIs'
@@ -75,7 +77,6 @@ $PipFlags = @('--disable-pip-version-check', '--no-input', '--quiet')
 $NpmCliSpecs = @{
     claude   = @{ Label = 'Claude CLI';  Packages = @('@anthropic-ai/claude-code') }
     codex    = @{ Label = 'Codex CLI';   Packages = @('@openai/codex') }
-    gemini   = @{ Label = 'Gemini CLI';  Packages = @('@google/gemini-cli') }
     grok     = @{ Label = 'Grok CLI (Vibe Kit)'; Packages = @('@vibe-kit/grok-cli') }
     qwen     = @{ Label = 'Qwen CLI';    Packages = @('@qwen-code/qwen-code', 'qwen-code') }
     copilot  = @{ Label = 'GitHub Copilot CLI'; Packages = @('@github/copilot', '@githubnext/github-copilot-cli') }
@@ -285,6 +286,32 @@ function Install-OllamaOfficial {
     Write-Log 'Installed/updated Ollama (official).'
 }
 
+function Install-WingetApp {
+    param([string]$Label, [string]$WingetId)
+    $winget = Get-WingetPath
+    if (-not $winget) {
+        Throw-InstallError "winget was not found. Cannot install $Label."
+    }
+    Write-Log "Installing $Label via winget ($WingetId)..."
+    $code = Invoke-ExternalCommand -Args @($winget, 'install', '--id', $WingetId, '-e', '--accept-package-agreements', '--accept-source-agreements', '--silent', '--disable-interactivity')
+    if ($code -ne 0) {
+        Write-WarnLog "winget install failed (exit $code). Trying winget upgrade..."
+        $code = Invoke-ExternalCommand -Args @($winget, 'upgrade', '--id', $WingetId, '-e', '--accept-package-agreements', '--accept-source-agreements', '--silent', '--disable-interactivity')
+        if ($code -ne 0) {
+            Throw-InstallError "Failed to install/update $Label (exit code $code)."
+        }
+    }
+    Write-Log "Installed/updated $Label."
+}
+
+function Install-Antigravity {
+    Install-WingetApp -Label 'Antigravity (Google)' -WingetId $AntigravityWingetId
+}
+
+function Install-VSCode {
+    Install-WingetApp -Label 'Visual Studio Code' -WingetId $VSCodeWingetId
+}
+
 function Get-CargoPath {
     $cmd = Get-Command cargo -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
@@ -460,94 +487,6 @@ function Ensure-MarkdownImport {
     }
 }
 
-function Ensure-GeminiRtkConfig {
-    param([Parameter(Mandatory = $true)][string]$RtkExe)
-    if (-not (Get-Command gemini -ErrorAction SilentlyContinue)) { return }
-    $geminiDir = Join-Path $env:USERPROFILE '.gemini'
-    if (-not (Test-Path -LiteralPath $geminiDir)) {
-        New-Item -ItemType Directory -Force -Path $geminiDir | Out-Null
-    }
-    $rtkMd = @'
-# RTK - Rust Token Killer (Gemini CLI)
-
-**Usage**: Token-optimized CLI proxy for shell commands.
-
-## Rule
-
-Always prefix shell commands with `rtk`.
-
-Examples:
-
-```bash
-rtk git status
-rtk cargo test
-rtk npm run build
-rtk pytest -q
-```
-
-## Hook-Based Usage
-
-Shell commands are automatically rewritten by the Gemini CLI `BeforeTool` hook.
-Example: `git status` -> `rtk git status` (transparent, 0 tokens overhead)
-
-## Meta Commands
-
-```bash
-rtk gain            # Token savings analytics
-rtk gain --history  # Recent command savings history
-rtk proxy <cmd>     # Run raw command without filtering
-```
-
-## Verification
-
-```bash
-rtk --version
-rtk gain
-which rtk
-```
-'@
-    Write-Utf8NoBom -Path (Join-Path $geminiDir 'RTK.md') -Content ($rtkMd + "`n")
-    Ensure-MarkdownImport -Path (Join-Path $geminiDir 'GEMINI.md') -ImportLine '@RTK.md'
-    $settingsPath = Join-Path $geminiDir 'settings.json'
-    try {
-        $settings = if (Test-Path -LiteralPath $settingsPath) {
-            Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
-        } else {
-            [pscustomobject]@{}
-        }
-        if (-not $settings.PSObject.Properties['hooks']) {
-            $settings | Add-Member -MemberType NoteProperty -Name hooks -Value ([pscustomobject]@{})
-        }
-        if (-not $settings.hooks.PSObject.Properties['BeforeTool']) {
-            $settings.hooks | Add-Member -MemberType NoteProperty -Name BeforeTool -Value @()
-        }
-        $kept = @()
-        foreach ($entry in @($settings.hooks.BeforeTool)) {
-            $hasRtkGemini = $false
-            foreach ($h in @($entry.hooks)) {
-                if ($h.type -eq 'command' -and (($h.command -as [string]) -match 'rtk(\.exe)?\s+hook\s+gemini')) {
-                    $hasRtkGemini = $true
-                }
-            }
-            if ($entry.matcher -eq 'run_shell_command' -and $hasRtkGemini) { continue }
-            $kept += $entry
-        }
-        $kept += [pscustomobject]@{
-            matcher = 'run_shell_command'
-            hooks = @([pscustomobject]@{
-                name = 'rtk-gemini-shell-prefix'
-                type = 'command'
-                command = "$RtkExe hook gemini"
-            })
-        }
-        $settings.hooks.BeforeTool = @($kept)
-        Write-Utf8NoBom -Path $settingsPath -Content (($settings | ConvertTo-Json -Depth 20) + "`n")
-        Write-Log 'Registered rtk hook for Gemini CLI'
-    } catch {
-        Write-WarnLog "Could not configure Gemini rtk hook: $($_.Exception.Message)"
-    }
-}
-
 function Test-AnyCommandAvailable {
     param([Parameter(Mandatory = $true)][string[]]$CommandNames)
     foreach ($name in $CommandNames) {
@@ -585,7 +524,6 @@ function Configure-RtkIntegrations {
     foreach ($agent in @('cursor','windsurf','cline','kilocode','antigravity','hermes')) {
         Invoke-RtkInitIfCommand -RtkExe $RtkExe -CommandNames @($agent) -InitArgs @('--agent', $agent) -Label $agent
     }
-    Ensure-GeminiRtkConfig -RtkExe $RtkExe
 }
 
 function Repair-ClaudeAfterFailedUpdate {
@@ -942,33 +880,14 @@ function Update-NpmCli([string[]]$Candidates) {
   }
 }
 
-# Re-emit the gemini shim. Gemini's npm shim can break when the package layout
-# under node_modules/@google changes between versions; rewriting it after each
-# update keeps the `gemini` command working.
-function Repair-GeminiShim() {
-  if (-not $npmPath) { return }
-  try {
-    $npmBin = (& $npmPath prefix -g 2>$null)
-    if (-not $npmBin) { return }
-    $npmBin = $npmBin.Trim()
-    if (-not (Test-Path -LiteralPath $npmBin)) { return }
-    $cmd = "@ECHO off`r`nGOTO start`r`n:find_dp0`r`nSET dp0=%~dp0`r`nEXIT /b`r`n:start`r`nSETLOCAL`r`nCALL :find_dp0`r`n`r`nSET `"GEMINI_ENTRY=`"`r`nIF EXIST `"%dp0%node_modules\@google\gemini-cli\bundle\gemini.js`" (`r`n  SET `"GEMINI_ENTRY=%dp0%node_modules\@google\gemini-cli\bundle\gemini.js`"`r`n) ELSE IF EXIST `"%dp0%node_modules\@google\gemini-cli\dist\index.js`" (`r`n  SET `"GEMINI_ENTRY=%dp0%node_modules\@google\gemini-cli\dist\index.js`"`r`n) ELSE (`r`n  for /d %%D in (`"%dp0%node_modules\@google\.gemini-cli-*`") do (`r`n    IF EXIST `"%%~fD\bundle\gemini.js`" (`r`n      SET `"GEMINI_ENTRY=%%~fD\bundle\gemini.js`"`r`n      GOTO found`r`n    )`r`n    IF EXIST `"%%~fD\dist\index.js`" (`r`n      SET `"GEMINI_ENTRY=%%~fD\dist\index.js`"`r`n      GOTO found`r`n    )`r`n  )`r`n)`r`n`r`n:found`r`nIF NOT DEFINED GEMINI_ENTRY (`r`n  ECHO Gemini CLI package not found under `"%dp0%node_modules\@google`" 1>&2`r`n  EXIT /b 1`r`n)`r`n`r`nIF EXIST `"%dp0%node.exe`" (`r`n  SET `"_prog=%dp0%node.exe`"`r`n) ELSE (`r`n  SET `"_prog=node`"`r`n  SET PATHEXT=%PATHEXT:;.JS;=;%`r`n)`r`n`r`nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & `"%_prog%`"  `"%GEMINI_ENTRY%`" %*`r`n"
-    Set-Content -LiteralPath (Join-Path $npmBin 'gemini.cmd') -Value $cmd -Encoding ASCII
-    $ps1Shim = Join-Path $npmBin 'gemini.ps1'
-    if (Test-Path -LiteralPath $ps1Shim) { Remove-Item -LiteralPath $ps1Shim -Force -ErrorAction SilentlyContinue }
-  } catch { }
-}
-
 if ($npmPath) {
   Update-NpmCli @("@anthropic-ai/claude-code")
   Update-NpmCli @("@openai/codex")
-  Update-NpmCli @("@google/gemini-cli")
   Update-NpmCli @("@vibe-kit/grok-cli")
   Update-NpmCli @("@qwen-code/qwen-code","qwen-code")
   Update-NpmCli @("@github/copilot","@githubnext/github-copilot-cli")
   Update-NpmCli @("openclaw")
   Update-NpmCli @("ironclaw")
-  Repair-GeminiShim
 }
 
 if (Test-Cmd "py") {
@@ -983,6 +902,8 @@ if (Test-Cmd "uv") {
 
 if (Test-Cmd "winget") {
   & winget upgrade --id Ollama.Ollama -e --accept-package-agreements --accept-source-agreements --silent --disable-interactivity *>&1 | Out-Null
+  & winget upgrade --id Google.Antigravity -e --accept-package-agreements --accept-source-agreements --silent --disable-interactivity *>&1 | Out-Null
+  & winget upgrade --id Microsoft.VisualStudioCode -e --accept-package-agreements --accept-source-agreements --silent --disable-interactivity *>&1 | Out-Null
 }
 
 function Write-Utf8NoBom([string]$Path, [string]$Content) {
@@ -1001,71 +922,6 @@ function Ensure-MarkdownImport([string]$Path, [string]$ImportLine) {
   if ($content -notmatch "(?m)^$([regex]::Escape($ImportLine))\s*$") {
     Write-Utf8NoBom $Path "$ImportLine`n`n$content"
   }
-}
-
-function Ensure-GeminiRtkConfig([string]$RtkExe) {
-  if (-not (Test-Cmd 'gemini')) { return }
-  $geminiDir = Join-Path $env:USERPROFILE '.gemini'
-  if (-not (Test-Path -LiteralPath $geminiDir)) { New-Item -ItemType Directory -Force -Path $geminiDir | Out-Null }
-  $rtkMd = @(
-    '# RTK - Rust Token Killer (Gemini CLI)'
-    ''
-    '**Usage**: Token-optimized CLI proxy for shell commands.'
-    ''
-    '## Rule'
-    ''
-    'Always prefix shell commands with `rtk`.'
-    ''
-    'Examples:'
-    ''
-    '```bash'
-    'rtk git status'
-    'rtk cargo test'
-    'rtk npm run build'
-    'rtk pytest -q'
-    '```'
-    ''
-    '## Hook-Based Usage'
-    ''
-    'Shell commands are automatically rewritten by the Gemini CLI `BeforeTool` hook.'
-    'Example: `git status` -> `rtk git status` (transparent, 0 tokens overhead)'
-    ''
-    '## Meta Commands'
-    ''
-    '```bash'
-    'rtk gain            # Token savings analytics'
-    'rtk gain --history  # Recent command savings history'
-    'rtk proxy <cmd>     # Run raw command without filtering'
-    '```'
-    ''
-    '## Verification'
-    ''
-    '```bash'
-    'rtk --version'
-    'rtk gain'
-    'which rtk'
-    '```'
-  ) -join "`n"
-  Write-Utf8NoBom (Join-Path $geminiDir 'RTK.md') ($rtkMd + "`n")
-  Ensure-MarkdownImport (Join-Path $geminiDir 'GEMINI.md') '@RTK.md'
-  $settingsPath = Join-Path $geminiDir 'settings.json'
-  try {
-    $s = if (Test-Path -LiteralPath $settingsPath) { Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
-    if (-not $s.PSObject.Properties['hooks']) { $s | Add-Member -MemberType NoteProperty -Name hooks -Value ([pscustomobject]@{}) }
-    if (-not $s.hooks.PSObject.Properties['BeforeTool']) { $s.hooks | Add-Member -MemberType NoteProperty -Name BeforeTool -Value @() }
-    $kept = @()
-    foreach ($entry in @($s.hooks.BeforeTool)) {
-      $hasRtkGemini = $false
-      foreach ($h in @($entry.hooks)) {
-        if ($h.type -eq 'command' -and (($h.command -as [string]) -match 'rtk(\.exe)?\s+hook\s+gemini')) { $hasRtkGemini = $true }
-      }
-      if ($entry.matcher -eq 'run_shell_command' -and $hasRtkGemini) { continue }
-      $kept += $entry
-    }
-    $kept += [pscustomobject]@{ matcher = 'run_shell_command'; hooks = @([pscustomobject]@{ name = 'rtk-gemini-shell-prefix'; type = 'command'; command = "$RtkExe hook gemini" }) }
-    $s.hooks.BeforeTool = @($kept)
-    Write-Utf8NoBom $settingsPath (($s | ConvertTo-Json -Depth 20) + "`n")
-  } catch { }
 }
 
 function Test-AnyCmd([string[]]$CommandNames) {
@@ -1136,7 +992,6 @@ function Update-Rtk {
   foreach ($agent in @('cursor','windsurf','cline','kilocode','antigravity','hermes')) {
     Invoke-RtkInitIfCommand -RtkExe $rtk -CommandNames @($agent) -InitArgs @('--agent',$agent)
   }
-  Ensure-GeminiRtkConfig $rtk
 
   $settingsPath = Join-Path $env:USERPROFILE '.claude\settings.json'
   if (Test-Path -LiteralPath $settingsPath) {
@@ -1230,7 +1085,7 @@ function Ensure-HiddenAutoUpdateTask {
 
 function Show-Targets {
     @(
-        'claude', 'codex', 'gemini', 'grok', 'qwen', 'copilot', 'openclaw', 'ironclaw', 'mistral', 'ollama', 'rtk', 'all'
+        'claude', 'codex', 'antigravity', 'vscode', 'grok', 'qwen', 'copilot', 'openclaw', 'ironclaw', 'mistral', 'ollama', 'rtk', 'all'
     ) | ForEach-Object { Write-Host $_ }
 }
 
@@ -1241,7 +1096,7 @@ Usage:
 
 Commands:
   install-all              Install all supported CLIs (default)
-  install <target>         Install one target (claude/codex/gemini/grok/qwen/copilot/openclaw/ironclaw/mistral/ollama/rtk/all)
+  install <target>         Install one target (claude/codex/antigravity/vscode/grok/qwen/copilot/openclaw/ironclaw/mistral/ollama/rtk/all)
   setup-updater            Configure hidden auto-update Scheduled Task only
   list                     List supported targets
   help                     Show help (or use: Get-Help .\install_all_windows.ps1 -Detailed)
@@ -1253,7 +1108,10 @@ function Install-Target {
     switch ($NormalizedTarget) {
         'claude'   { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'claude' -NpmPath $npm }
         'codex'    { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'codex' -NpmPath $npm }
-        'gemini'   { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'gemini' -NpmPath $npm }
+        'antigravity' { Install-Antigravity }
+        'agy'      { Install-Antigravity }
+        'vscode'   { Install-VSCode }
+        'code'     { Install-VSCode }
         'grok'     { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'grok' -NpmPath $npm }
         'qwen'     { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'qwen' -NpmPath $npm }
         'copilot'  { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'copilot' -NpmPath $npm }
@@ -1271,11 +1129,13 @@ function Install-Target {
 
 function Install-AllTargets {
     $npm = Ensure-NodeAndNpm
-    foreach ($key in @('claude','codex','gemini','grok','qwen','copilot','openclaw','ironclaw')) {
+    foreach ($key in @('claude','codex','grok','qwen','copilot','openclaw','ironclaw')) {
         Install-NpmCliTarget -Key $key -NpmPath $npm
     }
     Install-MistralVibe
     Install-OllamaOfficial
+    Install-Antigravity
+    Install-VSCode
 }
 
 function Normalize-Subcommand {

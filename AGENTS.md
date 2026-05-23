@@ -19,7 +19,8 @@ Main entry points:
 Installed CLIs currently include:
 - Claude
 - Codex
-- Gemini
+- Antigravity (Google's agentic IDE; ships an `antigravity` CLI)
+- Visual Studio Code (ships a `code` CLI)
 - Grok (`@vibe-kit/grok-cli`)
 - Qwen
 - GitHub Copilot CLI
@@ -27,6 +28,29 @@ Installed CLIs currently include:
 - IronClaw CLI (`ironclaw`)
 - Mistral Vibe CLI (`mistral-vibe`)
 - Ollama (official install)
+
+IDE-style CLIs (Antigravity, Visual Studio Code) are not npm packages. They are
+modeled as `CliSpec`s where `cli_is_app_installer(spec)` is true (i.e. `winget_id`
+or `linux_install_kind` is set) and are installed/uninstalled via `ensure_app_cli`
+/ `uninstall_app_cli`:
+- Windows: winget (`Google.Antigravity`, `Microsoft.VisualStudioCode`).
+- macOS: Homebrew casks (`antigravity`, `visual-studio-code`) via the normal
+  `macos_brew_cask` path; both are in `MACOS_BREW_CASK_CLIS` so the LaunchAgent
+  updater upgrades them.
+- Linux: direct download. Antigravity (`linux_install_kind="antigravity_tarball"`)
+  lists the public `antigravity-public` GCS bucket, picks the newest version dir
+  (skipping `dogfood`/`100.0.0`), downloads `linux-x64/Antigravity.tar.gz`, extracts
+  to `/opt/antigravity` (or `~/.local/opt`) and symlinks `antigravity` onto PATH.
+  VS Code (`linux_install_kind="vscode_pkg"`) installs the official `.deb`/`.rpm`
+  from code.visualstudio.com on Debian/Fedora, or the stable tarball under
+  `/opt/visual-studio-code` on other distros.
+- They are NOT added to the npm auto-update package list (their `pkg` is a winget
+  id, not an npm package); the Windows/macOS one-click updaters upgrade them via
+  winget/brew, mirroring how Ollama is handled.
+- rtk integration: Antigravity is wired via `rtk init -g --agent antigravity`
+  (it is in `RTK_OPTIONAL_INTEGRATIONS` and every updater's agent loop), so it
+  uses rtk like Cursor/Windsurf/etc. There is no per-app `.gemini`-style hook
+  config anymore.
 
 Auto-update behavior:
 - Windows GUI / PowerShell script: hidden Scheduled Task (`InstallTheCli - Update AI CLIs`)
@@ -72,8 +96,8 @@ Auto-update behavior:
 
 5. Keep macOS installs Homebrew-first unless an official installer is the only confirmed source.
 - The app must check for Homebrew. If missing, ask before installing it with the official Homebrew installer.
-- Known macOS CLI Homebrew casks: `claude-code`, `codex`, `copilot-cli`
-- Known macOS CLI Homebrew formulae: `gemini-cli`, `qwen-code`, `mistral-vibe`, `ollama`, `ironclaw`
+- Known macOS CLI Homebrew casks: `claude-code`, `codex`, `copilot-cli`, `antigravity`, `visual-studio-code`
+- Known macOS CLI Homebrew formulae: `qwen-code`, `mistral-vibe`, `ollama`, `ironclaw`
 - Known macOS desktop casks: `claude`, `chatgpt`, `codex-app`, `google-gemini`
 - OpenClaw uses the official installer at `https://openclaw.ai/install.sh` and requires Node `22.14+` (or newer).
 - Grok currently uses npm package `@vibe-kit/grok-cli`; install Node through Homebrew when needed.

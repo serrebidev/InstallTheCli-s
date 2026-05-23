@@ -53,8 +53,8 @@ Options:
 
 This script installs:
   - Homebrew if missing and you approve it
-  - Claude CLI, Codex CLI, Gemini CLI, Qwen CLI, GitHub Copilot CLI,
-    Mistral Vibe CLI, Ollama CLI, IronClaw CLI (Homebrew)
+  - Claude CLI, Codex CLI, Antigravity, Visual Studio Code, Qwen CLI,
+    GitHub Copilot CLI, Mistral Vibe CLI, Ollama CLI, IronClaw CLI (Homebrew)
   - Grok CLI (npm, with Node.js installed by Homebrew if needed)
   - OpenClaw CLI (official installer, with Node.js 22.14+ installed by Homebrew if needed)
   - RTK (Rust Token Killer) from git master via cargo (opt-in: 'install rtk')
@@ -67,7 +67,8 @@ print_targets() {
 Supported targets:
   claude
   codex
-  gemini
+  antigravity
+  vscode
   grok
   qwen
   copilot
@@ -270,7 +271,8 @@ install_openclaw_official() {
 install_all_targets() {
   brew_install_cask claude-code
   brew_install_cask codex
-  brew_install_formula gemini-cli
+  brew_install_cask antigravity
+  brew_install_cask visual-studio-code
   install_npm_cli "Grok CLI (Vibe Kit)" 20 "@vibe-kit/grok-cli"
   brew_install_formula qwen-code
   brew_install_cask copilot-cli
@@ -298,110 +300,6 @@ ensure_rust_toolchain_macos() {
     export PATH="${HOME}/.cargo/bin:${PATH}"
   fi
   command_exists cargo || die "cargo not found after rustup install. Open a new terminal and rerun."
-}
-
-configure_rtk_gemini() {
-  local rtk_bin="$1"
-  command_exists gemini || return 0
-  local gemini_dir="${HOME}/.gemini"
-  mkdir -p "$gemini_dir"
-  cat > "${gemini_dir}/RTK.md" <<'EOF'
-# RTK - Rust Token Killer (Gemini CLI)
-
-**Usage**: Token-optimized CLI proxy for shell commands.
-
-## Rule
-
-Always prefix shell commands with `rtk`.
-
-Examples:
-
-```bash
-rtk git status
-rtk cargo test
-rtk npm run build
-rtk pytest -q
-```
-
-## Hook-Based Usage
-
-Shell commands are automatically rewritten by the Gemini CLI `BeforeTool` hook.
-Example: `git status` -> `rtk git status` (transparent, 0 tokens overhead)
-
-## Meta Commands
-
-```bash
-rtk gain            # Token savings analytics
-rtk gain --history  # Recent command savings history
-rtk proxy <cmd>     # Run raw command without filtering
-```
-
-## Verification
-
-```bash
-rtk --version
-rtk gain
-which rtk
-```
-EOF
-  if [[ ! -f "${gemini_dir}/GEMINI.md" ]]; then
-    printf '%s\n' '@RTK.md' > "${gemini_dir}/GEMINI.md"
-  elif ! grep -Fxq '@RTK.md' "${gemini_dir}/GEMINI.md"; then
-    local tmp
-    tmp="$(mktemp)"
-    printf '%s\n\n' '@RTK.md' > "$tmp"
-    cat "${gemini_dir}/GEMINI.md" >> "$tmp"
-    mv "$tmp" "${gemini_dir}/GEMINI.md"
-  fi
-  if command_exists python3; then
-    python3 - "${gemini_dir}/settings.json" "$rtk_bin" <<'PY'
-import json
-import os
-import re
-import sys
-
-settings_path, rtk_bin = sys.argv[1:3]
-try:
-    with open(settings_path, "r", encoding="utf-8") as fh:
-        settings = json.load(fh)
-except FileNotFoundError:
-    settings = {}
-except json.JSONDecodeError:
-    raise SystemExit(0)
-
-hooks = settings.setdefault("hooks", {})
-before_tool = hooks.setdefault("BeforeTool", [])
-pattern = re.compile(r"rtk(\.exe)?\s+hook\s+gemini")
-kept = []
-for entry in before_tool:
-    entry_hooks = entry.get("hooks", []) if isinstance(entry, dict) else []
-    has_rtk = any(
-        isinstance(h, dict)
-        and h.get("type") == "command"
-        and pattern.search(str(h.get("command", "")))
-        for h in entry_hooks
-    )
-    if isinstance(entry, dict) and entry.get("matcher") == "run_shell_command" and has_rtk:
-        continue
-    kept.append(entry)
-kept.append({
-    "matcher": "run_shell_command",
-    "hooks": [{
-        "name": "rtk-gemini-shell-prefix",
-        "type": "command",
-        "command": f"{rtk_bin} hook gemini",
-    }],
-})
-hooks["BeforeTool"] = kept
-os.makedirs(os.path.dirname(settings_path), exist_ok=True)
-with open(settings_path, "w", encoding="utf-8", newline="\n") as fh:
-    json.dump(settings, fh, indent=2)
-    fh.write("\n")
-PY
-  else
-    "$rtk_bin" init -g --gemini || warn "rtk init (Gemini) failed"
-  fi
-  log "Registered rtk hook for Gemini CLI"
 }
 
 rtk_has_any_command() {
@@ -442,7 +340,6 @@ configure_rtk_integrations() {
     "$rtk_bin" init -g --codex || warn "rtk init (Codex) failed"
   fi
   configure_rtk_supported_agents "$rtk_bin"
-  configure_rtk_gemini "$rtk_bin"
 }
 
 # Install rtk-ai/rtk from git master via cargo. Mirror the Linux/Windows
@@ -476,7 +373,8 @@ install_single_target() {
     all) install_all_targets ;;
     claude) brew_install_cask claude-code ;;
     codex) brew_install_cask codex ;;
-    gemini) brew_install_formula gemini-cli ;;
+    antigravity|agy) brew_install_cask antigravity ;;
+    vscode|code) brew_install_cask visual-studio-code ;;
     grok) install_npm_cli "Grok CLI (Vibe Kit)" 20 "@vibe-kit/grok-cli" ;;
     qwen) brew_install_formula qwen-code ;;
     copilot) brew_install_cask copilot-cli ;;
@@ -544,7 +442,6 @@ update_npm_package() {
 
 if [[ -n "$brew_bin" ]]; then
   "$brew_bin" update >/dev/null 2>&1 || true
-  update_brew_package formula gemini-cli
   update_brew_package formula qwen-code
   update_brew_package formula mistral-vibe
   update_brew_package formula ollama
@@ -552,97 +449,12 @@ if [[ -n "$brew_bin" ]]; then
   update_brew_package cask claude-code
   update_brew_package cask codex
   update_brew_package cask copilot-cli
+  update_brew_package cask antigravity
+  update_brew_package cask visual-studio-code
 fi
 
 update_npm_package "@vibe-kit/grok-cli"
 update_npm_package "openclaw"
-
-configure_rtk_gemini() {
-  local rtk_bin="$1"
-  command_exists gemini || return 0
-  local gemini_dir="${HOME}/.gemini"
-  mkdir -p "$gemini_dir"
-  cat > "${gemini_dir}/RTK.md" <<'RTKMD'
-# RTK - Rust Token Killer (Gemini CLI)
-
-**Usage**: Token-optimized CLI proxy for shell commands.
-
-## Rule
-
-Always prefix shell commands with `rtk`.
-
-Examples:
-
-```bash
-rtk git status
-rtk cargo test
-rtk npm run build
-rtk pytest -q
-```
-
-## Hook-Based Usage
-
-Shell commands are automatically rewritten by the Gemini CLI `BeforeTool` hook.
-Example: `git status` -> `rtk git status` (transparent, 0 tokens overhead)
-
-## Meta Commands
-
-```bash
-rtk gain            # Token savings analytics
-rtk gain --history  # Recent command savings history
-rtk proxy <cmd>     # Run raw command without filtering
-```
-
-## Verification
-
-```bash
-rtk --version
-rtk gain
-which rtk
-```
-RTKMD
-  if [[ ! -f "${gemini_dir}/GEMINI.md" ]]; then
-    printf '%s\n' '@RTK.md' > "${gemini_dir}/GEMINI.md"
-  elif ! grep -Fxq '@RTK.md' "${gemini_dir}/GEMINI.md"; then
-    local tmp
-    tmp="$(mktemp)"
-    printf '%s\n\n' '@RTK.md' > "$tmp"
-    cat "${gemini_dir}/GEMINI.md" >> "$tmp"
-    mv "$tmp" "${gemini_dir}/GEMINI.md"
-  fi
-  if command_exists python3; then
-    python3 - "${gemini_dir}/settings.json" "$rtk_bin" <<'PY'
-import json, os, re, sys
-settings_path, rtk_bin = sys.argv[1:3]
-try:
-    with open(settings_path, "r", encoding="utf-8") as fh:
-        settings = json.load(fh)
-except FileNotFoundError:
-    settings = {}
-except json.JSONDecodeError:
-    raise SystemExit(0)
-hooks = settings.setdefault("hooks", {})
-before_tool = hooks.setdefault("BeforeTool", [])
-pattern = re.compile(r"rtk(\.exe)?\s+hook\s+gemini")
-kept = []
-for entry in before_tool:
-    entry_hooks = entry.get("hooks", []) if isinstance(entry, dict) else []
-    has_rtk = any(isinstance(h, dict) and h.get("type") == "command" and pattern.search(str(h.get("command", ""))) for h in entry_hooks)
-    if isinstance(entry, dict) and entry.get("matcher") == "run_shell_command" and has_rtk:
-        continue
-    kept.append(entry)
-kept.append({"matcher": "run_shell_command", "hooks": [{"name": "rtk-gemini-shell-prefix", "type": "command", "command": f"{rtk_bin} hook gemini"}]})
-hooks["BeforeTool"] = kept
-os.makedirs(os.path.dirname(settings_path), exist_ok=True)
-with open(settings_path, "w", encoding="utf-8", newline="\n") as fh:
-    json.dump(settings, fh, indent=2)
-    fh.write("\n")
-PY
-  else
-    "$rtk_bin" init -g --gemini >/dev/null 2>&1 || true
-  fi
-  log "Registered rtk hook for Gemini CLI"
-}
 
 rtk_has_any_command() {
   local name
@@ -667,7 +479,6 @@ configure_rtk_integrations() {
   command_exists claude && "$rtk_bin" init -g --auto-patch >/dev/null 2>&1 || true
   command_exists codex && "$rtk_bin" init -g --codex >/dev/null 2>&1 || true
   configure_rtk_supported_agents "$rtk_bin"
-  configure_rtk_gemini "$rtk_bin"
 }
 
 # Rebuild rtk from latest git master if it's already installed. Bust the
@@ -786,7 +597,7 @@ parse_args() {
     help)
       SUBCOMMAND="help"
       ;;
-    claude|codex|gemini|grok|qwen|copilot|openclaw|ironclaw|mistral|mistral-vibe|vibe|ollama|rtk|all)
+    claude|codex|antigravity|agy|vscode|code|grok|qwen|copilot|openclaw|ironclaw|mistral|mistral-vibe|vibe|ollama|rtk|all)
       SUBCOMMAND="install"
       TARGET="$command_name"
       ;;
@@ -846,7 +657,7 @@ main() {
   if [[ "$SUBCOMMAND" == "setup-launch-agent" ]]; then
     log "launchd updater is configured."
   else
-    log "Open a new shell and run: claude, codex, gemini, grok, qwen, copilot, openclaw, ironclaw, vibe, ollama"
+    log "Open a new shell and run: claude, codex, antigravity, code, grok, qwen, copilot, openclaw, ironclaw, vibe, ollama"
   fi
 }
 
