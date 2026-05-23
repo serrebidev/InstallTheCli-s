@@ -32,6 +32,13 @@ NODE_WINGET_ID = "OpenJS.NodeJS.LTS"
 PYTHON_314_WINGET_ID = "Python.Python.3.14"
 OLLAMA_WINGET_ID = "Ollama.Ollama"
 ANTIGRAVITY_WINGET_ID = "Google.Antigravity"
+ANTIGRAVITY_IDE_WINGET_ID = "Google.AntigravityIDE"
+ANTIGRAVITY_IDE_BREW_CASK = "antigravity-ide"
+# Standalone Antigravity CLI (`agy`): official self-updating bootstrapper.
+# Installs `agy`/`agy.exe` to ~/.local/bin (Unix) or %LOCALAPPDATA%\agy\bin (Windows).
+ANTIGRAVITY_CLI_CMD = "agy"
+ANTIGRAVITY_CLI_INSTALL_SH = "https://antigravity.google/cli/install.sh"
+ANTIGRAVITY_CLI_INSTALL_PS1 = "https://antigravity.google/cli/install.ps1"
 VSCODE_WINGET_ID = "Microsoft.VisualStudioCode"
 # Google Antigravity publishes its Linux builds (tar.gz + AppImage) to a public
 # Google Cloud Storage bucket under versioned prefixes. There is no stable
@@ -79,7 +86,7 @@ NPM_INSTALL_RETRY_DELAY_SECONDS = 2.0
 NPM_QUIET_FLAGS = ["--no-fund", "--no-audit", "--no-update-notifier", "--loglevel", "error"]
 PIP_QUIET_FLAGS = ["--disable-pip-version-check", "--no-input", "--quiet"]
 MACOS_BREW_FORMULA_CLIS = ("qwen-code", "mistral-vibe", "ollama", "ironclaw")
-MACOS_BREW_CASK_CLIS = ("claude-code", "codex", "copilot-cli", "antigravity", "visual-studio-code")
+MACOS_BREW_CASK_CLIS = ("claude-code", "codex", "copilot-cli", "antigravity", "visual-studio-code", "antigravity-ide")
 MACOS_NPM_UPDATE_PACKAGES = (GROK_NPM_PACKAGE, OPENCLAW_NPM_PACKAGE)
 RTK_OPTIONAL_INTEGRATIONS = (
     ("GitHub Copilot CLI", ("copilot", "github-copilot-cli", "github-copilot"), ("--copilot",)),
@@ -123,8 +130,8 @@ class CliSpec:
 
 def cli_is_app_installer(spec: "CliSpec") -> bool:
     """True for IDE-style CLIs installed via winget/brew-cask/direct-download
-    (Antigravity, VS Code) rather than npm/pip/cargo."""
-    return bool(spec.winget_id or spec.linux_install_kind)
+    (Antigravity, VS Code, Antigravity CLI) rather than npm/pip/cargo."""
+    return bool(spec.winget_id or spec.linux_install_kind or spec.key == "antigravity_cli")
 
 
 @dataclass(frozen=True)
@@ -164,17 +171,42 @@ CLI_SPECS: tuple[CliSpec, ...] = (
     ),
     CliSpec(
         key="antigravity",
-        label="Antigravity (Google)",
+        label="Antigravity 2.0 (Google)",
         help_text=(
-            "Installs Google Antigravity agentic IDE and its `antigravity` CLI "
+            "Installs the Google Antigravity 2.0 app and its `antigravity` CLI "
             "(Windows: winget; macOS: Homebrew cask; Linux: official tar.gz from antigravity.google)."
         ),
         package_candidates=(ANTIGRAVITY_WINGET_ID,),
         command_candidates=("antigravity",),
-        shortcut_name="Antigravity",
+        shortcut_name="Antigravity 2.0",
         macos_brew_cask="antigravity",
         winget_id=ANTIGRAVITY_WINGET_ID,
         linux_install_kind="antigravity_tarball",
+    ),
+    CliSpec(
+        key="antigravity_cli",
+        label="Antigravity CLI",
+        help_text=(
+            "Installs the standalone Antigravity CLI (`agy`) using Google's official "
+            "self-updating installer from antigravity.google/cli (Windows/macOS/Linux)."
+        ),
+        package_candidates=("antigravity-cli",),
+        command_candidates=(ANTIGRAVITY_CLI_CMD,),
+        shortcut_name="Antigravity CLI",
+    ),
+    CliSpec(
+        key="antigravity_ide",
+        label="Antigravity IDE",
+        help_text=(
+            "Installs the Antigravity IDE (Windows: winget Google.AntigravityIDE; "
+            "macOS: Homebrew cask antigravity-ide). Not available on Linux."
+        ),
+        package_candidates=(ANTIGRAVITY_IDE_WINGET_ID,),
+        command_candidates=("antigravity-ide", "antigravity"),
+        shortcut_name="Antigravity IDE",
+        macos_brew_cask=ANTIGRAVITY_IDE_BREW_CASK,
+        winget_id=ANTIGRAVITY_IDE_WINGET_ID,
+        optional=True,
     ),
     CliSpec(
         key="vscode",
@@ -2370,6 +2402,7 @@ def _windows_app_install_folder_names(spec: CliSpec) -> list[str]:
     return {
         "vscode": ["Microsoft VS Code"],
         "antigravity": ["Antigravity"],
+        "antigravity_ide": ["Antigravity IDE", "AntigravityIDE"],
     }.get(spec.key, [])
 
 
@@ -2377,6 +2410,7 @@ def _macos_app_bundle_name(spec: CliSpec) -> Optional[str]:
     return {
         "vscode": "Visual Studio Code",
         "antigravity": "Antigravity",
+        "antigravity_ide": "Antigravity IDE",
     }.get(spec.key)
 
 
@@ -2402,7 +2436,15 @@ def get_app_cli_bin_dirs(spec: CliSpec, log: Callable[[str], None]) -> list[str]
     """Directories that may contain the editor's CLI shim after install."""
     del log  # kept for call-shape consistency with the other *_bin_dirs helpers
     dirs: list[str] = []
-    if is_windows():
+    if spec.key == "antigravity_cli":
+        if is_windows():
+            local_app = os.environ.get("LocalAppData")
+            if local_app:
+                dirs.append(os.path.join(local_app, "agy", "bin"))
+        else:
+            dirs.append(os.path.expanduser("~/.local/bin"))
+            dirs.append("/usr/local/bin")
+    elif is_windows():
         local_app = os.environ.get("LocalAppData")
         program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
         program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
@@ -2659,10 +2701,29 @@ def install_vscode_linux(log: Callable[[str], None]) -> tuple[bool, Optional[str
 
 
 def ensure_app_cli(spec: CliSpec, log: Callable[[str], None]) -> tuple[bool, Optional[str]]:
-    """Install an IDE-style CLI (Antigravity, VS Code) on the current platform."""
+    """Install an IDE-style CLI (Antigravity, VS Code, Antigravity CLI) on the current platform."""
+    if spec.key == "antigravity_cli":
+        if is_windows():
+            log("Installing standalone Antigravity CLI via Google's install.ps1...")
+            cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                   "Invoke-Expression (Invoke-RestMethod 'https://antigravity.google/cli/install.ps1')"]
+            code = run_command(cmd, log)
+            if code == 0:
+                return (True, "antigravity-cli")
+            return (False, f"Powershell installer failed with exit code {format_exit_code(code)}")
+        else:
+            log("Installing standalone Antigravity CLI via Google's install.sh...")
+            url = ANTIGRAVITY_CLI_INSTALL_SH
+            code = run_command(["/bin/bash", "-c", f"curl -fsSL {url} | /bin/bash"], log)
+            if code == 0:
+                return (True, "antigravity-cli")
+            return (False, f"Bash installer failed with exit code {format_exit_code(code)}")
+
     if is_windows():
         return ensure_cli_via_winget(spec, log)
     if is_linux():
+        if spec.key == "antigravity_ide":
+            return (False, "Antigravity IDE is not available on Linux.")
         if spec.linux_install_kind == "antigravity_tarball":
             return install_antigravity_linux(log)
         if spec.linux_install_kind == "vscode_pkg":
@@ -2674,6 +2735,28 @@ def ensure_app_cli(spec: CliSpec, log: Callable[[str], None]) -> tuple[bool, Opt
 
 
 def uninstall_app_cli(spec: CliSpec, log: Callable[[str], None]) -> tuple[bool, Optional[str]]:
+    if spec.key == "antigravity_cli":
+        if is_windows():
+            local_app = os.environ.get("LocalAppData")
+            if local_app:
+                agy_dir = os.path.join(local_app, "agy")
+                if os.path.exists(agy_dir):
+                    shutil.rmtree(agy_dir, ignore_errors=True)
+            return (True, "antigravity-cli")
+        else:
+            paths = [os.path.expanduser("~/.local/bin/agy"), "/usr/local/bin/agy"]
+            sudo = _linux_sudo() if is_linux() else []
+            for p in paths:
+                if os.path.exists(p):
+                    try:
+                        if sudo:
+                            run_command([*sudo, "rm", "-f", p], log)
+                        else:
+                            os.remove(p)
+                    except Exception as e:
+                        log(f"Warning: failed to remove {p}: {e}")
+            return (True, "antigravity-cli")
+
     if is_windows():
         winget = find_winget()
         if not winget:
@@ -2701,6 +2784,8 @@ def uninstall_app_cli(spec: CliSpec, log: Callable[[str], None]) -> tuple[bool, 
         return (True, package_name)
 
     if is_linux():
+        if spec.key == "antigravity_ide":
+            return (True, "antigravity-ide")
         sudo = _linux_sudo()
         cmd = spec.command_candidates[0] if spec.command_candidates else ""
         if spec.linux_install_kind == "vscode_pkg":

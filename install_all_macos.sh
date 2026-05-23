@@ -68,6 +68,8 @@ Supported targets:
   claude
   codex
   antigravity
+  antigravity_cli
+  antigravity_ide
   vscode
   grok
   qwen
@@ -272,6 +274,9 @@ install_all_targets() {
   brew_install_cask claude-code
   brew_install_cask codex
   brew_install_cask antigravity
+  log "Installing standalone Antigravity CLI (agy) via official installer..."
+  run_shell "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+  brew_install_cask antigravity-ide
   brew_install_cask visual-studio-code
   install_npm_cli "Grok CLI (Vibe Kit)" 20 "@vibe-kit/grok-cli"
   brew_install_formula qwen-code
@@ -373,7 +378,12 @@ install_single_target() {
     all) install_all_targets ;;
     claude) brew_install_cask claude-code ;;
     codex) brew_install_cask codex ;;
-    antigravity|agy) brew_install_cask antigravity ;;
+    antigravity) brew_install_cask antigravity ;;
+    antigravity_cli|agy)
+      log "Installing standalone Antigravity CLI (agy) via official installer..."
+      run_shell "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+      ;;
+    antigravity_ide) brew_install_cask antigravity-ide ;;
     vscode|code) brew_install_cask visual-studio-code ;;
     grok) install_npm_cli "Grok CLI (Vibe Kit)" 20 "@vibe-kit/grok-cli" ;;
     qwen) brew_install_formula qwen-code ;;
@@ -450,6 +460,7 @@ if [[ -n "$brew_bin" ]]; then
   update_brew_package cask codex
   update_brew_package cask copilot-cli
   update_brew_package cask antigravity
+  update_brew_package cask antigravity-ide
   update_brew_package cask visual-studio-code
 fi
 
@@ -597,7 +608,7 @@ parse_args() {
     help)
       SUBCOMMAND="help"
       ;;
-    claude|codex|antigravity|agy|vscode|code|grok|qwen|copilot|openclaw|ironclaw|mistral|mistral-vibe|vibe|ollama|rtk|all)
+    claude|codex|antigravity|antigravity_cli|antigravity_ide|agy|vscode|code|grok|qwen|copilot|openclaw|ironclaw|mistral|mistral-vibe|vibe|ollama|rtk|all)
       SUBCOMMAND="install"
       TARGET="$command_name"
       ;;

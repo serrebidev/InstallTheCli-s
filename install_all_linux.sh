@@ -80,6 +80,8 @@ Supported targets:
   claude
   codex
   antigravity
+  antigravity_cli
+  antigravity_ide
   vscode
   grok
   qwen
@@ -452,6 +454,15 @@ install_antigravity_linux() {
   log "Installed Antigravity to ${ANTIGRAVITY_INSTALL_DIR} and linked antigravity into /usr/local/bin."
 }
 
+install_antigravity_cli_linux() {
+  if (( DRY_RUN )); then
+    log "[dry-run] install Antigravity CLI via official install.sh"
+    return 0
+  fi
+  log "Installing standalone Antigravity CLI (agy) via official installer..."
+  curl -fsSL https://antigravity.google/cli/install.sh | bash
+}
+
 install_vscode_linux() {
   case "$DISTRO_FAMILY" in
     debian)
@@ -611,6 +622,7 @@ install_all_targets() {
   install_mistral_vibe
   install_ollama_official
   install_antigravity_linux
+  install_antigravity_cli_linux
   install_vscode_linux
 }
 
@@ -626,8 +638,14 @@ install_single_target() {
     ollama)
       install_ollama_official
       ;;
-    antigravity|agy)
+    antigravity)
       install_antigravity_linux
+      ;;
+    antigravity_cli|agy)
+      install_antigravity_cli_linux
+      ;;
+    antigravity_ide)
+      die "Antigravity IDE is not available on Linux."
       ;;
     vscode|code)
       install_vscode_linux
@@ -932,7 +950,7 @@ parse_args() {
     help)
       SUBCOMMAND="help"
       ;;
-    claude|codex|antigravity|agy|vscode|code|grok|qwen|copilot|openclaw|ironclaw|mistral|mistral-vibe|vibe|ollama|rtk|all)
+    claude|codex|antigravity|antigravity_cli|antigravity_ide|agy|vscode|code|grok|qwen|copilot|openclaw|ironclaw|mistral|mistral-vibe|vibe|ollama|rtk|all)
       # Convenience alias: treat first positional target as "install <target>"
       SUBCOMMAND="install"
       TARGET="${positional[0],,}"

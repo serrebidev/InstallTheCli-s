@@ -534,6 +534,7 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("setup-cron", script)
         self.assertIn('install -g "${candidate}@latest"', script)
         self.assertIn("if (( DRY_RUN )); then", script)
+        self.assertIn("install.sh", script)
 
         with open(script_path, "rb") as f:
             raw = f.read()
@@ -548,6 +549,8 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("HOMEBREW_INSTALL_URL", script)
         self.assertIn("brew_install_cask codex", script)
         self.assertIn("brew_install_cask antigravity", script)
+        self.assertIn("brew_install_cask antigravity-ide", script)
+        self.assertIn("install.sh", script)
         self.assertIn("brew_install_cask visual-studio-code", script)
         self.assertIn("brew_install_formula qwen-code", script)
         self.assertIn("brew_install_formula mistral-vibe", script)
@@ -622,6 +625,8 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("New-ScheduledTaskAction -Execute 'wscript.exe'", script)
         # Antigravity + VS Code install/upgrade via winget; Gemini CLI removed.
         self.assertIn("Google.Antigravity", script)
+        self.assertIn("Google.AntigravityIDE", script)
+        self.assertIn("install.ps1", script)
         self.assertIn("Microsoft.VisualStudioCode", script)
         self.assertNotIn("gemini", script.lower())
 
@@ -4523,6 +4528,82 @@ class AntigravityVSCodeInstallTests(unittest.TestCase):
         with patch.object(m, "is_windows", return_value=False), patch.object(m, "is_linux", return_value=False), patch.object(m, "is_macos", return_value=True), patch.object(m.os.path, "isdir", return_value=True):
             dirs = m.get_app_cli_bin_dirs(self._spec("vscode"), lambda _m: None)
         self.assertTrue(any("Visual Studio Code.app" in d for d in dirs))
+
+    def test_ensure_app_cli_antigravity_cli_windows(self) -> None:
+        spec = self._spec("antigravity_cli")
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "is_linux", return_value=False),
+            patch.object(m, "is_macos", return_value=False),
+            patch.object(m, "run_command", return_value=0) as run_mock,
+        ):
+            ok, pkg = m.ensure_app_cli(spec, lambda _m: None)
+        self.assertTrue(ok)
+        self.assertEqual(pkg, "antigravity-cli")
+        self.assertIn("install.ps1", run_mock.call_args[0][0][-1])
+
+    def test_ensure_app_cli_antigravity_cli_unix(self) -> None:
+        spec = self._spec("antigravity_cli")
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_linux", return_value=True),
+            patch.object(m, "is_macos", return_value=False),
+            patch.object(m, "run_command", return_value=0) as run_mock,
+        ):
+            ok, pkg = m.ensure_app_cli(spec, lambda _m: None)
+        self.assertTrue(ok)
+        self.assertEqual(pkg, "antigravity-cli")
+        self.assertIn("install.sh", run_mock.call_args[0][0][-1])
+
+    def test_ensure_app_cli_antigravity_ide_linux_error(self) -> None:
+        spec = self._spec("antigravity_ide")
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_linux", return_value=True),
+            patch.object(m, "is_macos", return_value=False),
+        ):
+            ok, err = m.ensure_app_cli(spec, lambda _m: None)
+        self.assertFalse(ok)
+        self.assertIn("not available", err.lower())
+
+    def test_uninstall_app_cli_antigravity_cli_windows(self) -> None:
+        spec = self._spec("antigravity_cli")
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "is_linux", return_value=False),
+            patch.object(m, "is_macos", return_value=False),
+            patch.dict(m.os.environ, {"LocalAppData": r"C:\Users\u\AppData\Local"}),
+            patch.object(m.os.path, "exists", return_value=True),
+            patch.object(m.shutil, "rmtree") as rm_mock,
+        ):
+            ok, pkg = m.uninstall_app_cli(spec, lambda _m: None)
+        self.assertTrue(ok)
+        self.assertEqual(pkg, "antigravity-cli")
+        rm_mock.assert_called_once_with(r"C:\Users\u\AppData\Local\agy", ignore_errors=True)
+
+    def test_uninstall_app_cli_antigravity_cli_unix(self) -> None:
+        spec = self._spec("antigravity_cli")
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_linux", return_value=True),
+            patch.object(m, "is_macos", return_value=False),
+            patch.object(m.os.path, "exists", return_value=True),
+            patch.object(m, "run_command", return_value=0) as run_mock,
+        ):
+            ok, pkg = m.uninstall_app_cli(spec, lambda _m: None)
+        self.assertTrue(ok)
+        self.assertEqual(pkg, "antigravity-cli")
+        self.assertIn("rm", run_mock.call_args[0][0])
+
+    def test_get_app_cli_bin_dirs_antigravity_cli(self) -> None:
+        spec = self._spec("antigravity_cli")
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.dict(m.os.environ, {"LocalAppData": r"C:\Users\u\AppData\Local"}),
+            patch.object(m.os.path, "isdir", return_value=True),
+        ):
+            dirs = m.get_app_cli_bin_dirs(spec, lambda _m: None)
+        self.assertIn(r"C:\Users\u\AppData\Local\agy\bin", dirs)
 
 
 if __name__ == "__main__":  # pragma: no cover

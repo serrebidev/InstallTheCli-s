@@ -63,6 +63,8 @@ $NodeWingetId = 'OpenJS.NodeJS.LTS'
 $PythonWingetId = 'Python.Python.3.14'
 $OllamaWingetId = 'Ollama.Ollama'
 $AntigravityWingetId = 'Google.Antigravity'
+$AntigravityCliInstallPs1 = 'https://antigravity.google/cli/install.ps1'
+$AntigravityIdeWingetId = 'Google.AntigravityIDE'
 $VSCodeWingetId = 'Microsoft.VisualStudioCode'
 $RustupWingetId = 'Rustlang.Rustup'
 $RtkGitUrl = 'https://github.com/rtk-ai/rtk'
@@ -306,6 +308,20 @@ function Install-WingetApp {
 
 function Install-Antigravity {
     Install-WingetApp -Label 'Antigravity (Google)' -WingetId $AntigravityWingetId
+}
+
+function Install-AntigravityCli {
+    Write-Log 'Installing standalone Antigravity CLI (agy) via official PowerShell installer...'
+    Invoke-Expression (Invoke-RestMethod $AntigravityCliInstallPs1)
+    $agyBin = Join-Path $env:LOCALAPPDATA 'agy\bin'
+    if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $agyBin })) {
+        $env:PATH = "$agyBin;$env:PATH"
+    }
+    Write-Log 'Installed/updated Antigravity CLI (agy).'
+}
+
+function Install-AntigravityIde {
+    Install-WingetApp -Label 'Antigravity IDE' -WingetId $AntigravityIdeWingetId
 }
 
 function Install-VSCode {
@@ -903,6 +919,7 @@ if (Test-Cmd "uv") {
 if (Test-Cmd "winget") {
   & winget upgrade --id Ollama.Ollama -e --accept-package-agreements --accept-source-agreements --silent --disable-interactivity *>&1 | Out-Null
   & winget upgrade --id Google.Antigravity -e --accept-package-agreements --accept-source-agreements --silent --disable-interactivity *>&1 | Out-Null
+  & winget upgrade --id Google.AntigravityIDE -e --accept-package-agreements --accept-source-agreements --silent --disable-interactivity *>&1 | Out-Null
   & winget upgrade --id Microsoft.VisualStudioCode -e --accept-package-agreements --accept-source-agreements --silent --disable-interactivity *>&1 | Out-Null
 }
 
@@ -1085,7 +1102,7 @@ function Ensure-HiddenAutoUpdateTask {
 
 function Show-Targets {
     @(
-        'claude', 'codex', 'antigravity', 'vscode', 'grok', 'qwen', 'copilot', 'openclaw', 'ironclaw', 'mistral', 'ollama', 'rtk', 'all'
+        'claude', 'codex', 'antigravity', 'antigravity_cli', 'antigravity_ide', 'vscode', 'grok', 'qwen', 'copilot', 'openclaw', 'ironclaw', 'mistral', 'ollama', 'rtk', 'all'
     ) | ForEach-Object { Write-Host $_ }
 }
 
@@ -1096,7 +1113,7 @@ Usage:
 
 Commands:
   install-all              Install all supported CLIs (default)
-  install <target>         Install one target (claude/codex/antigravity/vscode/grok/qwen/copilot/openclaw/ironclaw/mistral/ollama/rtk/all)
+  install <target>         Install one target (claude/codex/antigravity/antigravity_cli/antigravity_ide/vscode/grok/qwen/copilot/openclaw/ironclaw/mistral/ollama/rtk/all)
   setup-updater            Configure hidden auto-update Scheduled Task only
   list                     List supported targets
   help                     Show help (or use: Get-Help .\install_all_windows.ps1 -Detailed)
@@ -1109,7 +1126,10 @@ function Install-Target {
         'claude'   { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'claude' -NpmPath $npm }
         'codex'    { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'codex' -NpmPath $npm }
         'antigravity' { Install-Antigravity }
-        'agy'      { Install-Antigravity }
+        'antigravity_cli' { Install-AntigravityCli }
+        'antigravity_ide' { Install-AntigravityIde }
+        'agy'      { Install-AntigravityCli }
+        'antigravity-ide' { Install-AntigravityIde }
         'vscode'   { Install-VSCode }
         'code'     { Install-VSCode }
         'grok'     { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'grok' -NpmPath $npm }
@@ -1135,6 +1155,8 @@ function Install-AllTargets {
     Install-MistralVibe
     Install-OllamaOfficial
     Install-Antigravity
+    Install-AntigravityCli
+    Install-AntigravityIde
     Install-VSCode
 }
 
