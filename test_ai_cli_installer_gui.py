@@ -4417,6 +4417,7 @@ class AntigravityVSCodeInstallTests(unittest.TestCase):
         with (
             patch.object(m, "detect_linux_distro_family", return_value="debian"),
             patch.object(m, "command_exists", return_value=True),
+            patch.object(m, "ensure_linux_root_for_package_installs", return_value=True),
             patch.object(m.tempfile, "mkdtemp", return_value=tempfile.mkdtemp()),
             patch.object(m, "_linux_sudo", return_value=[]),
             patch.object(m, "run_command", side_effect=lambda a, _l: (calls.append(a) or 0)),
@@ -4432,6 +4433,7 @@ class AntigravityVSCodeInstallTests(unittest.TestCase):
         with (
             patch.object(m, "detect_linux_distro_family", return_value="fedora"),
             patch.object(m, "command_exists", return_value=True),
+            patch.object(m, "ensure_linux_root_for_package_installs", return_value=True),
             patch.object(m.tempfile, "mkdtemp", return_value=tempfile.mkdtemp()),
             patch.object(m, "_linux_sudo", return_value=[]),
             patch.object(m, "run_command", side_effect=lambda a, _l: (calls.append(a) or 0)),
