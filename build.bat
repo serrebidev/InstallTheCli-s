@@ -188,7 +188,7 @@ if /I not "%LINUX_CONCLUSION%"=="success" (
 echo [release] Linux build succeeded. Verifying release asset...
 gh release view "v%NEXT_VERSION%" --repo "%GITHUB_REPO_SLUG%" --json assets --jq ".assets[].name" | findstr /I "linux" >nul
 if errorlevel 1 (
-    echo [release] WARNING: No Linux asset found on release v%NEXT_VERSION% (build succeeded but upload may have failed).
+    echo [release] WARNING: No Linux asset found on release v%NEXT_VERSION% - build succeeded but upload may have failed.
     exit /b 1
 )
 echo [release] Linux artifact confirmed on release v%NEXT_VERSION%.
