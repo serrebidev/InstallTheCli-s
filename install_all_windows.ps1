@@ -444,7 +444,8 @@ function Update-ClaudeRtkHookCommand {
     try {
         $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
         if (-not $settings.hooks -or -not $settings.hooks.PreToolUse) { return }
-        $rtkPosix = '/c/Users/' + (Split-Path -Leaf $env:USERPROFILE) + '/.cargo/bin/rtk.exe'
+        $up = $env:USERPROFILE
+        $rtkPosix = '/' + $up.Substring(0,1).ToLower() + ($up.Substring(2) -replace '\\','/') + '/.cargo/bin/rtk.exe'
         $want = if (Install-RtkBashShim -RtkPosix $rtkPosix) { 'rtk hook claude' } else { "$rtkPosix hook claude" }
         $changed = $false
         $seen = @{}
@@ -457,7 +458,7 @@ function Update-ClaudeRtkHookCommand {
                     $changed = $true
                 }
             }
-            $key = ($entry.hooks | ForEach-Object { $_.command }) -join '|'
+            $key = ($entry | ConvertTo-Json -Depth 20 -Compress)
             if ($seen.ContainsKey($key)) {
                 $changed = $true
             } else {
@@ -466,8 +467,8 @@ function Update-ClaudeRtkHookCommand {
             }
         }
         if ($changed) {
-            $settings.hooks.PreToolUse = $kept
-            ($settings | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $settingsPath -Encoding utf8
+            $settings.hooks.PreToolUse = @($kept)
+            [System.IO.File]::WriteAllText($settingsPath, ($settings | ConvertTo-Json -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
             Write-Log "Pinned Claude Code rtk hook command to '$want'"
         }
     } catch {
@@ -1015,8 +1016,8 @@ function Update-Rtk {
     try {
       $s = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
       if ($s.hooks -and $s.hooks.PreToolUse) {
-        $userLeaf = Split-Path -Leaf $env:USERPROFILE
-        $rtkPosix = "/c/Users/$userLeaf/.cargo/bin/rtk.exe"
+        $up = $env:USERPROFILE
+        $rtkPosix = '/' + $up.Substring(0,1).ToLower() + ($up.Substring(2) -replace '\\','/') + '/.cargo/bin/rtk.exe'
         $want = if (Install-RtkBashShim -RtkPosix $rtkPosix) { 'rtk hook claude' } else { "$rtkPosix hook claude" }
         $changed = $false
         $seen = @{}
@@ -1029,12 +1030,12 @@ function Update-Rtk {
               $changed = $true
             }
           }
-          $key = ($entry.hooks | ForEach-Object { $_.command }) -join '|'
+          $key = ($entry | ConvertTo-Json -Depth 20 -Compress)
           if ($seen.ContainsKey($key)) { $changed = $true } else { $seen[$key] = $true; $kept += $entry }
         }
         if ($changed) {
-          $s.hooks.PreToolUse = $kept
-          ($s | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $settingsPath -Encoding utf8
+          $s.hooks.PreToolUse = @($kept)
+          [System.IO.File]::WriteAllText($settingsPath, ($s | ConvertTo-Json -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
         }
       }
     } catch { }

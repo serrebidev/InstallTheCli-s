@@ -135,6 +135,21 @@ require_root() {
   fi
 }
 
+# pip --user, uv, and rustup all honor $HOME. Under `sudo` without -H, $HOME is
+# the invoking user's home, so `pip install --user` would land in that user's
+# ~/.local while our symlinks and the cron PATH point at root's home. Pin $HOME
+# to root's real home (from passwd, normally /root) so every per-user install
+# is consistent with the /root/.local and /root/.cargo paths used below.
+ensure_root_home() {
+  if (( DRY_RUN )); then
+    return 0
+  fi
+  local root_home
+  root_home="$(getent passwd 0 2>/dev/null | cut -d: -f6)"
+  [[ -n "$root_home" ]] || root_home="/root"
+  export HOME="$root_home"
+}
+
 command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
@@ -253,6 +268,18 @@ install_base_dependencies() {
   install_linux_packages "${pkgs[@]}"
 }
 
+# Distro nodejs packages can be well behind current (e.g. Node 18 on Debian
+# stable). Several CLIs require newer Node (Codex/Grok need 20+, OpenClaw needs
+# 22+), so warn rather than fail silently when the installed node is too old.
+warn_if_node_too_old() {
+  command_exists node || return 0
+  local major
+  major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+  if [[ "$major" =~ ^[0-9]+$ ]] && (( major < 20 )); then
+    warn "Node.js $(node -v 2>/dev/null) is older than v20. Codex/Grok need Node 20+ and OpenClaw needs 22+; those CLIs may fail to install or run. Install a newer Node (e.g. via NodeSource or nvm) and re-run."
+  fi
+}
+
 verify_core_binaries() {
   if (( DRY_RUN )); then
     log "Dry-run: skipping post-install binary verification."
@@ -262,6 +289,7 @@ verify_core_binaries() {
   command_exists npm || die "npm not found after install."
   command_exists curl || die "curl not found after install."
   log "Core tools available: node=$(command -v node), npm=$(command -v npm), curl=$(command -v curl)"
+  warn_if_node_too_old
 }
 
 python_meets_mistral_requirement() {
@@ -668,6 +696,11 @@ update_script_content() {
 set -Eeuo pipefail
 IFS=$'\n\t'
 PATH="/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# pip --user / uv honor $HOME; pin it to root's home so updates land in the same
+# /root/.local the cron PATH points at, regardless of the invoking environment.
+HOME="$(getent passwd 0 2>/dev/null | cut -d: -f6)"
+[ -n "$HOME" ] || HOME="/root"
+export HOME
 LOG_PREFIX="[installthecli-update]"
 OLLAMA_INSTALL_URL="https://ollama.com/install.sh"
 NPM_FLAGS=(--no-fund --no-audit --no-update-notifier --loglevel error)
@@ -977,6 +1010,7 @@ main() {
   esac
 
   require_root
+  ensure_root_home
   detect_distro_family
   configure_distro_package_metadata
 

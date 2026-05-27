@@ -100,14 +100,23 @@ set "NOTES_PATH=%RELEASE_DIR%\release-notes-v%NEXT_VERSION%.md"
 exit /b 0
 
 :tag_and_push
-git rev-parse "v%NEXT_VERSION%" >nul 2>&1
+REM Abort only if the tag already exists on the REMOTE (i.e. already released).
+REM A failed prior publish leaves no remote tag, so retries work cleanly.
+git ls-remote --exit-code --tags origin "refs/tags/v%NEXT_VERSION%" >nul 2>&1
 if not errorlevel 1 (
-    echo [release] Tag v%NEXT_VERSION% already exists.
+    echo [release] Tag v%NEXT_VERSION% already exists on origin.
     exit /b 1
 )
-git tag "v%NEXT_VERSION%" || exit /b 1
+REM Resolve the exact commit to release and push it, so the tag that gh creates
+REM in :publish_release points at a commit that exists on origin.
+set "REL_SHA="
+for /f "delims=" %%C in ('git rev-parse HEAD') do set "REL_SHA=%%C"
+if not defined REL_SHA (echo [release] Could not resolve HEAD commit.& exit /b 1)
 git push origin HEAD || exit /b 1
-git push origin "v%NEXT_VERSION%" || exit /b 1
+REM NOTE: we deliberately do NOT push the tag here. gh release create creates
+REM the tag (at REL_SHA) together with the release in :publish_release, so the
+REM tag never appears on origin without a release for the CI workflows to
+REM upload their assets to. If publish fails, no remote tag is left behind.
 exit /b 0
 
 :publish_release
@@ -120,6 +129,7 @@ gh release create "v%NEXT_VERSION%" ^
     "%RELEASE_DIR%\install_all_macos.sh" ^
     "%RELEASE_DIR%\install_all_linux.sh" ^
     --repo "%GITHUB_REPO_SLUG%" ^
+    --target "%REL_SHA%" ^
     --title "%APP_NAME% v%NEXT_VERSION%" ^
     --notes-file "%NOTES_PATH%" ^
     --latest
@@ -151,7 +161,10 @@ set "LINUX_RUN_ID="
 set /a "FIND_ATTEMPT=0"
 :find_linux_run
 set /a "FIND_ATTEMPT=FIND_ATTEMPT+1"
-for /f "delims=" %%I in ('gh run list --repo "%GITHUB_REPO_SLUG%" --workflow=linux-build.yml --event=push --limit 20 --json databaseId^,headBranch --jq ".[] | select(.headBranch == \"v%NEXT_VERSION%\") | .databaseId" 2^>nul') do set "LINUX_RUN_ID=%%I"
+REM gh run list is newest-first; keep only the first match so a re-tag/re-run
+REM doesn't latch onto a stale older run (the for loop would otherwise end on
+REM the last/oldest line).
+for /f "delims=" %%I in ('gh run list --repo "%GITHUB_REPO_SLUG%" --workflow=linux-build.yml --event=push --limit 20 --json databaseId^,headBranch --jq ".[] | select(.headBranch == \"v%NEXT_VERSION%\") | .databaseId" 2^>nul') do if not defined LINUX_RUN_ID set "LINUX_RUN_ID=%%I"
 if not defined LINUX_RUN_ID (
     if %FIND_ATTEMPT% lss 6 (
         echo [release] Linux workflow run not visible yet ^(attempt %FIND_ATTEMPT%/6^), retrying in 10s...
@@ -186,9 +199,9 @@ if /I not "%LINUX_CONCLUSION%"=="success" (
     exit /b 1
 )
 echo [release] Linux build succeeded. Verifying release asset...
-gh release view "v%NEXT_VERSION%" --repo "%GITHUB_REPO_SLUG%" --json assets --jq ".assets[].name" | findstr /I "linux" >nul
+gh release view "v%NEXT_VERSION%" --repo "%GITHUB_REPO_SLUG%" --json assets --jq ".assets[].name" | findstr /I /C:"-linux.tar.gz" >nul
 if errorlevel 1 (
-    echo [release] WARNING: No Linux asset found on release v%NEXT_VERSION% - build succeeded but upload may have failed.
+    echo [release] WARNING: No Linux tarball found on release v%NEXT_VERSION% - build succeeded but upload may have failed.
     exit /b 1
 )
 echo [release] Linux artifact confirmed on release v%NEXT_VERSION%.

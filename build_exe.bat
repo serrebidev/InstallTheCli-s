@@ -26,6 +26,16 @@ set "EC=!ERRORLEVEL!"
 if not "!EC!"=="0" goto :fallback_fail
 
 echo [build] Success: !DISTDIR!\InstallTheCli.exe
+REM The release flow (build.bat :stage_assets) only consumes dist\InstallTheCli.exe,
+REM so promote the recovered fallback build into dist\. If dist\ is genuinely
+REM locked (a running instance), fail loudly here rather than letting the release
+REM abort later with a confusing "expected build output not found" message.
+if not exist "dist" mkdir "dist"
+copy /Y "!DISTDIR!\InstallTheCli.exe" "dist\InstallTheCli.exe" >nul
+if errorlevel 1 (
+  echo [build] ERROR: could not promote fallback build to dist\InstallTheCli.exe ^(locked or running?^).
+  endlocal & endlocal & exit /b 1
+)
 if exist "%LOGFILE%" del /q "%LOGFILE%" >nul 2>nul
 endlocal & endlocal & exit /b 0
 

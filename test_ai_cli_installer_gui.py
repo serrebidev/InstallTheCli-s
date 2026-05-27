@@ -4185,7 +4185,9 @@ class RtkIntegrationTests(unittest.TestCase):
         # Hook command: bare form via Git-Bash shim, absolute-path fallback.
         self.assertIn("Install-RtkBashShim", script)
         self.assertIn("'rtk hook claude'", script)
-        self.assertIn("/c/Users/", script)
+        # POSIX rtk path is derived from $env:USERPROFILE, not hardcoded to C:.
+        self.assertNotIn("/c/Users/", script)
+        self.assertIn("$up.Substring(0,1).ToLower()", script)
         self.assertIn("/.cargo/bin/rtk.exe", script)
         self.assertIn("$rtkPosix hook claude", script)
 

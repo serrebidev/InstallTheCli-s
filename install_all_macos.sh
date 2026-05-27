@@ -307,6 +307,24 @@ ensure_rust_toolchain_macos() {
   command_exists cargo || die "cargo not found after rustup install. Open a new terminal and rerun."
 }
 
+# rustup-init --no-modify-path (and Homebrew's rustup) do not add ~/.cargo/bin to
+# the login shell, so cargo-installed binaries like rtk won't resolve in new
+# shells. Persist it to the zsh login profile (macOS default) idempotently.
+ensure_cargo_bin_on_path_macos() {
+  if (( DRY_RUN )); then
+    return 0
+  fi
+  local cargo_bin="${HOME}/.cargo/bin"
+  [[ -d "$cargo_bin" ]] || return 0
+  local marker="# InstallTheCli cargo bin"
+  local profile="${HOME}/.zprofile"
+  if [[ -f "$profile" ]] && grep -Fq "$marker" "$profile"; then
+    return 0
+  fi
+  printf '\nexport PATH="%s:$PATH"  %s\n' "$cargo_bin" "$marker" >> "$profile"
+  log "Added ${cargo_bin} to PATH in ${profile} (open a new shell to pick it up)."
+}
+
 rtk_has_any_command() {
   local name
   for name in "$@"; do
@@ -353,6 +371,7 @@ configure_rtk_integrations() {
 # rebuild the same old SHA when only the master ref has moved.
 install_rtk() {
   ensure_rust_toolchain_macos
+  ensure_cargo_bin_on_path_macos
   local cargo_bin
   cargo_bin="$(dirname "$(command -v cargo)")"
   for d in "${HOME}/.cargo/git/checkouts/"rtk-* "${HOME}/.cargo/git/db/"rtk-*; do

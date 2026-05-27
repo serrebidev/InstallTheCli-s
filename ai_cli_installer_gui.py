@@ -934,8 +934,8 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "    try {",
         "      $s = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json",
         "      if ($s.hooks -and $s.hooks.PreToolUse) {",
-        "        $userLeaf = Split-Path -Leaf $env:USERPROFILE",
-        "        $rtkPosix = \"/c/Users/$userLeaf/.cargo/bin/rtk.exe\"",
+        "        $up = $env:USERPROFILE",
+        "        $rtkPosix = '/' + $up.Substring(0,1).ToLower() + ($up.Substring(2) -replace '\\\\','/') + '/.cargo/bin/rtk.exe'",
         "        $want = if (Install-RtkBashShim -RtkPosix $rtkPosix) { 'rtk hook claude' } else { \"$rtkPosix hook claude\" }",
         "        $changed = $false",
         "        $seen = @{}",
@@ -947,12 +947,12 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "              $h.command = $want; $changed = $true",
         "            }",
         "          }",
-        "          $key = ($entry.hooks | ForEach-Object { $_.command }) -join '|'",
+        "          $key = ($entry | ConvertTo-Json -Depth 20 -Compress)",
         "          if ($seen.ContainsKey($key)) { $changed = $true } else { $seen[$key] = $true; $kept += $entry }",
         "        }",
         "        if ($changed) {",
-        "          $s.hooks.PreToolUse = $kept",
-        "          ($s | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $settingsPath -Encoding utf8",
+        "          $s.hooks.PreToolUse = @($kept)",
+        "          [System.IO.File]::WriteAllText($settingsPath, ($s | ConvertTo-Json -Depth 20), (New-Object System.Text.UTF8Encoding($false)))",
         "        }",
         "      }",
         "    } catch { }",
@@ -3226,6 +3226,17 @@ def _install_rtk_bash_shim(rtk_posix: str, log: Callable[[str], None]) -> bool:
         return False
 
 
+def _windows_path_to_git_bash_posix(win_path: str) -> str:
+    """Translate a Windows path (e.g. C:\\Users\\admin) into the Git-Bash POSIX
+    form (/c/Users/admin), without assuming the profile lives on C: or directly
+    under C:\\Users."""
+    drive, rest = os.path.splitdrive(win_path)
+    rest = rest.replace("\\", "/")
+    if len(drive) >= 2 and drive[1] == ":":
+        return "/" + drive[0].lower() + rest
+    return win_path.replace("\\", "/")
+
+
 def _normalize_claude_rtk_hook(log: Callable[[str], None]) -> None:
     """Pin the Claude Code PreToolUse Bash hook command to the bare
     `rtk hook claude` form when a Git-Bash-resolvable rtk shim can be installed
@@ -3244,8 +3255,8 @@ def _normalize_claude_rtk_hook(log: Callable[[str], None]) -> None:
     hooks = settings.get("hooks", {}).get("PreToolUse")
     if not hooks:
         return
-    user_leaf = os.path.basename(os.environ.get("USERPROFILE", os.path.expanduser("~")))
-    rtk_posix = f"/c/Users/{user_leaf}/.cargo/bin/rtk.exe"
+    user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+    rtk_posix = _windows_path_to_git_bash_posix(user_profile) + "/.cargo/bin/rtk.exe"
     if _install_rtk_bash_shim(rtk_posix, log):
         want = "rtk hook claude"
     else:
@@ -3263,7 +3274,7 @@ def _normalize_claude_rtk_hook(log: Callable[[str], None]) -> None:
             if h.get("type") == "command" and rtk_pattern.search(cmd) and cmd != want:
                 h["command"] = want
                 changed = True
-        key = "|".join(h.get("command", "") for h in entry.get("hooks", []))
+        key = json.dumps(entry, sort_keys=True)
         if key in seen:
             changed = True
         else:
@@ -3703,8 +3714,14 @@ def _winget_app_installed(winget_id: str, winget_source: Optional[str] = None) -
     completed = _probe_command(args)
     if not completed or completed.returncode != 0:
         return False
-    combined = ((completed.stdout or "") + "\n" + (completed.stderr or "")).lower()
-    return winget_id.lower() in combined
+    combined = (completed.stdout or "") + "\n" + (completed.stderr or "")
+    # `winget list --id <id> -e` exits 0 only on an exact installed match, but
+    # guard against builds that print "No installed package found" with a 0 exit,
+    # and avoid substring false positives (a short id contained in a longer one)
+    # by requiring the id to appear as a whitespace-delimited token.
+    if re.search(r"No installed package found", combined, re.IGNORECASE):
+        return False
+    return re.search(r"(?:^|\s)" + re.escape(winget_id) + r"(?:\s|$)", combined, re.MULTILINE) is not None
 
 
 def _flatpak_app_installed(flatpak_id: str) -> bool:
