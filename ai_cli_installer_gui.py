@@ -697,6 +697,320 @@ def write_text_file(path: str, content: str) -> None:
         f.write(content)
 
 
+def build_windows_terminal_compatibility_script() -> str:
+    return r"""
+function Write-Utf8NoBom([string]$Path, [string]$Content) {
+  $dir = Split-Path -Parent $Path
+  if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+  $encoding = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+}
+
+function Repair-CurrentWindowsPowerShellModulePath {
+  if ($PSVersionTable.PSEdition -ne 'Desktop') { return }
+  $pwshModuleRoot = Join-Path $env:ProgramFiles 'PowerShell\7\Modules'
+  $env:PSModulePath = (($env:PSModulePath -split [IO.Path]::PathSeparator) |
+    Where-Object { $_ -and ($_.TrimEnd('\') -ine $pwshModuleRoot.TrimEnd('\')) } |
+    Select-Object -Unique) -join [IO.Path]::PathSeparator
+}
+
+function Remove-StaleAiCliProfileShims([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  try {
+    $content = Get-Content -LiteralPath $Path -Raw
+    $pattern = '(?ms)^\s*# BEGIN AI-CLIS (?:CODEX|CLAUDE|GEMINI) SHIM\r?\n.*?^# END AI-CLIS (?:CODEX|CLAUDE|GEMINI) SHIM\r?\n?'
+    $updated = [regex]::Replace($content, $pattern, '')
+    if ($updated -ne $content) { Write-Utf8NoBom $Path $updated }
+  } catch { }
+}
+
+function Ensure-ProfileBlock([string]$Path, [string]$BeginMarker, [string]$EndMarker, [string]$Block) {
+  try {
+    $content = if (Test-Path -LiteralPath $Path) { Get-Content -LiteralPath $Path -Raw } else { '' }
+    $pattern = "(?ms)^$([regex]::Escape($BeginMarker))\r?\n.*?^$([regex]::Escape($EndMarker))\r?\n?"
+    if ($content -match $pattern) {
+      $updated = [regex]::Replace($content, $pattern, "$Block`n")
+    } else {
+      $separator = if ([string]::IsNullOrEmpty($content)) { '' } elseif ($content.StartsWith("`r`n") -or $content.StartsWith("`n")) { "`n" } else { "`n`n" }
+      $updated = "$Block$separator$content"
+    }
+    if ($updated -ne $content) { Write-Utf8NoBom $Path $updated }
+  } catch { }
+}
+
+function Ensure-WindowsPowerShellProfileGuard([string]$WindowsPowerShellAllHostsProfile) {
+  $begin = '# BEGIN INSTALLTHECLI WINDOWS POWERSHELL MODULEPATH GUARD'
+  $end = '# END INSTALLTHECLI WINDOWS POWERSHELL MODULEPATH GUARD'
+  $block = @'
+# BEGIN INSTALLTHECLI WINDOWS POWERSHELL MODULEPATH GUARD
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
+  $pwshModuleRoot = Join-Path $env:ProgramFiles 'PowerShell\7\Modules'
+  $env:PSModulePath = (($env:PSModulePath -split [IO.Path]::PathSeparator) |
+    Where-Object {
+      $_ -and
+      ($_.TrimEnd('\') -ine $pwshModuleRoot.TrimEnd('\'))
+    } |
+    Select-Object -Unique) -join [IO.Path]::PathSeparator
+}
+# END INSTALLTHECLI WINDOWS POWERSHELL MODULEPATH GUARD
+'@
+  Ensure-ProfileBlock $WindowsPowerShellAllHostsProfile $begin $end $block
+}
+
+function Ensure-WindowsCliExecutionPolicy {
+  try {
+    Repair-CurrentWindowsPowerShellModulePath
+    $policy = Get-ExecutionPolicy -Scope CurrentUser
+    if ($policy -notin @('RemoteSigned','Unrestricted','Bypass')) {
+      Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
+    }
+  } catch { }
+}
+
+function Get-NormalizedWindowsPathKey([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+  try {
+    return [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($Path)).TrimEnd('\').ToLowerInvariant()
+  } catch {
+    return $Path.Trim().TrimEnd('\').ToLowerInvariant()
+  }
+}
+
+function Add-UniqueWindowsCliPathCandidate([System.Collections.Generic.List[string]]$Candidates, [string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path)) { return }
+  if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return }
+  $key = Get-NormalizedWindowsPathKey $Path
+  foreach ($existing in $Candidates) {
+    if ((Get-NormalizedWindowsPathKey $existing) -eq $key) { return }
+  }
+  [void]$Candidates.Add($Path)
+}
+
+function Get-WindowsCliPathCandidateDirs {
+  $candidates = New-Object System.Collections.Generic.List[string]
+  foreach ($candidate in @(
+    (Join-Path $env:ProgramFiles 'nodejs'),
+    (Join-Path ${env:ProgramFiles(x86)} 'nodejs'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\nodejs'),
+    (Join-Path $env:APPDATA 'npm'),
+    (Join-Path $env:LOCALAPPDATA 'agy\bin'),
+    (Join-Path $env:USERPROFILE '.cargo\bin'),
+    (Join-Path $env:USERPROFILE '.local\bin'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\Ollama'),
+    (Join-Path $env:ProgramFiles 'Ollama'),
+    (Join-Path ${env:ProgramFiles(x86)} 'Ollama')
+  )) {
+    Add-UniqueWindowsCliPathCandidate $candidates $candidate
+  }
+
+  foreach ($pythonRoot in @((Join-Path $env:APPDATA 'Python'), (Join-Path $env:LOCALAPPDATA 'Programs\Python'))) {
+    if (-not ($pythonRoot -and (Test-Path -LiteralPath $pythonRoot -PathType Container))) { continue }
+    Get-ChildItem -LiteralPath $pythonRoot -Directory -Filter 'Python*' -ErrorAction SilentlyContinue |
+      ForEach-Object { Add-UniqueWindowsCliPathCandidate $candidates (Join-Path $_.FullName 'Scripts') }
+  }
+
+  foreach ($folder in @('Microsoft VS Code', 'Antigravity', 'antigravity', 'Antigravity IDE', 'AntigravityIDE')) {
+    foreach ($root in @((Join-Path $env:LOCALAPPDATA 'Programs'), $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+      if (-not $root) { continue }
+      $appRoot = Join-Path $root $folder
+      Add-UniqueWindowsCliPathCandidate $candidates $appRoot
+      Add-UniqueWindowsCliPathCandidate $candidates (Join-Path $appRoot 'bin')
+    }
+  }
+  return @($candidates)
+}
+
+function Send-WindowsEnvironmentChanged {
+  try {
+    if (-not ('InstallTheCliNativeMethods' -as [type])) {
+      Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class InstallTheCliNativeMethods {
+  [DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Auto)]
+  public static extern IntPtr SendMessageTimeout(IntPtr hWnd, int Msg, UIntPtr wParam, string lParam, int fuFlags, int uTimeout, out UIntPtr lpdwResult);
+}
+'@ -ErrorAction Stop
+    }
+    $result = [UIntPtr]::Zero
+    [void][InstallTheCliNativeMethods]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 0x2, 5000, [ref]$result)
+  } catch { }
+}
+
+function Ensure-WindowsCliPathEntries {
+  $dirs = @(Get-WindowsCliPathCandidateDirs)
+  if ($dirs.Count -eq 0) { return }
+  try {
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $parts = @()
+    if (-not [string]::IsNullOrWhiteSpace($userPath)) {
+      $parts = @($userPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+    $seen = @{}
+    foreach ($part in $parts) {
+      $key = Get-NormalizedWindowsPathKey $part
+      if ($key) { $seen[$key] = $true }
+    }
+    $added = New-Object System.Collections.Generic.List[string]
+    foreach ($dir in $dirs) {
+      $key = Get-NormalizedWindowsPathKey $dir
+      if (-not $key -or $seen.ContainsKey($key)) { continue }
+      $parts += $dir
+      $seen[$key] = $true
+      [void]$added.Add($dir)
+    }
+    if ($added.Count -gt 0) {
+      [Environment]::SetEnvironmentVariable('Path', ($parts -join ';'), 'User')
+      Send-WindowsEnvironmentChanged
+      Write-Output "Added CLI directories to user PATH: $($added -join ', ')"
+    }
+
+    $currentParts = @([string]$env:PATH -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $currentSeen = @{}
+    foreach ($part in $currentParts) {
+      $key = Get-NormalizedWindowsPathKey $part
+      if ($key) { $currentSeen[$key] = $true }
+    }
+    $prepend = @()
+    foreach ($dir in $dirs) {
+      $key = Get-NormalizedWindowsPathKey $dir
+      if ($key -and -not $currentSeen.ContainsKey($key)) {
+        $prepend += $dir
+        $currentSeen[$key] = $true
+      }
+    }
+    if ($prepend.Count -gt 0) {
+      $env:PATH = (($prepend + $currentParts) -join ';')
+    }
+  } catch { }
+}
+
+function Test-SafeWindowsCliPath([string]$Path) {
+  try {
+    $full = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $roots = @($env:USERPROFILE, $env:APPDATA, $env:LOCALAPPDATA, $env:LOCALAPPDATA + '\InstallTheCli') | Where-Object { $_ }
+    foreach ($root in $roots) {
+      $rootFull = [System.IO.Path]::GetFullPath($root).TrimEnd('\')
+      if ($full.Equals($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+      if ($full.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+  } catch { }
+  return $false
+}
+
+function Remove-ExplicitDenyAces([string]$Path) {
+  try {
+    $acl = Get-Acl -LiteralPath $Path
+    $denyRules = @($acl.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny -and -not $_.IsInherited })
+    foreach ($rule in $denyRules) { [void]$acl.RemoveAccessRuleSpecific($rule) }
+    if ($denyRules.Count -gt 0) { Set-Acl -LiteralPath $Path -AclObject $acl }
+  } catch { }
+}
+
+function Test-WindowsPrincipalExists([string]$Principal) {
+  try {
+    [void]([System.Security.Principal.NTAccount]$Principal).Translate([System.Security.Principal.SecurityIdentifier])
+    return $true
+  } catch { return $false }
+}
+
+function Ensure-WindowsCliDirectoryPermissions {
+  $targets = @(
+    (Join-Path $env:APPDATA 'npm'),
+    (Join-Path $env:LOCALAPPDATA 'agy'),
+    (Join-Path $env:USERPROFILE '.codex'),
+    (Join-Path $env:USERPROFILE '.codex-tmp'),
+    (Join-Path $env:USERPROFILE '.claude'),
+    (Join-Path $env:USERPROFILE '.agents'),
+    (Join-Path $env:USERPROFILE '.gemini'),
+    (Join-Path $env:USERPROFILE '.cargo'),
+    (Join-Path $env:LOCALAPPDATA 'AnthropicClaude'),
+    (Join-Path $env:LOCALAPPDATA 'Claude'),
+    (Join-Path $env:LOCALAPPDATA 'OpenAI'),
+    (Join-Path $env:APPDATA 'Claude'),
+    (Join-Path $env:LOCALAPPDATA 'InstallTheCli')
+  ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) -and (Test-SafeWindowsCliPath $_) } | Select-Object -Unique
+  if (-not $targets) { return }
+  $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+  $sandboxPrincipal = "$env:COMPUTERNAME\CodexSandboxUsers"
+  $hasSandbox = Test-WindowsPrincipalExists $sandboxPrincipal
+  foreach ($target in $targets) {
+    try {
+      Remove-ExplicitDenyAces $target
+      $grantArgs = @($target, '/inheritance:e', '/grant', "${currentUser}:(OI)(CI)(F)", 'NT AUTHORITY\SYSTEM:(OI)(CI)(F)', 'BUILTIN\Administrators:(OI)(CI)(F)')
+      if ($hasSandbox) { $grantArgs += "${sandboxPrincipal}:(OI)(CI)(M)" }
+      & icacls @grantArgs *> $null
+    } catch { }
+  }
+}
+
+function Unblock-WindowsCliFiles {
+  foreach ($dir in @((Join-Path $env:APPDATA 'npm'), (Join-Path $env:LOCALAPPDATA 'agy\bin'), (Join-Path $env:USERPROFILE '.cargo\bin'))) {
+    if (-not ($dir -and (Test-Path -LiteralPath $dir -PathType Container))) { continue }
+    try {
+      Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Extension -in @('.ps1','.cmd','.bat','.exe') -or $_.Name -match '^(codex|claude|agy|rtk|grok|qwen|copilot|github-copilot|openclaw|ironclaw|mistral-vibe|vibe)(\..*)?$' } |
+        ForEach-Object { Unblock-File -LiteralPath $_.FullName -ErrorAction SilentlyContinue }
+    } catch { }
+  }
+}
+
+function Ensure-WindowsCliTerminalCompatibility {
+  Repair-CurrentWindowsPowerShellModulePath
+  Ensure-WindowsCliPathEntries
+  $documents = [Environment]::GetFolderPath('MyDocuments')
+  $windowsPowerShellAllHosts = Join-Path $documents 'WindowsPowerShell\profile.ps1'
+  foreach ($profilePath in @(
+    $windowsPowerShellAllHosts,
+    (Join-Path $documents 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1'),
+    (Join-Path $documents 'PowerShell\profile.ps1'),
+    (Join-Path $documents 'PowerShell\Microsoft.PowerShell_profile.ps1')
+  )) {
+    Remove-StaleAiCliProfileShims $profilePath
+  }
+  Ensure-WindowsPowerShellProfileGuard $windowsPowerShellAllHosts
+  Ensure-WindowsCliExecutionPolicy
+  Ensure-WindowsCliDirectoryPermissions
+  Unblock-WindowsCliFiles
+}
+Ensure-WindowsCliTerminalCompatibility
+""".strip() + "\n"
+
+
+def ensure_windows_terminal_compatibility(log: Callable[[str], None]) -> None:
+    if not is_windows():
+        return
+    log("Repairing Windows terminal compatibility for AI CLI shims and profiles...")
+    try:
+        completed = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                build_windows_terminal_compatibility_script(),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **subprocess_creationflags_kwargs(),
+        )
+    except OSError as exc:
+        log(f"Windows terminal compatibility warning: {exc}")
+        return
+    output = (completed.stdout or "") + (completed.stderr or "")
+    for line in output.splitlines():
+        if line.strip():
+            log(line.rstrip())
+    if completed.returncode != 0:
+        log(
+            "Windows terminal compatibility warning: "
+            f"PowerShell exited with code {format_exit_code(completed.returncode)}"
+        )
+
+
 def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
     npm_quiet_args = " ".join(
         powershell_single_quote(flag) for flag in NPM_QUIET_FLAGS
@@ -706,6 +1020,7 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
     lines = [
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
+        *build_windows_terminal_compatibility_script().splitlines(),
         "function Get-NpmPath([string]$ConfiguredNpm) {",
         "  if ($ConfiguredNpm -and (Test-Path -LiteralPath $ConfiguredNpm)) { return $ConfiguredNpm }",
         "  $cmd = Get-Command npm -ErrorAction SilentlyContinue",
@@ -959,6 +1274,7 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "  }",
         "}",
         "Update-Rtk",
+        "Ensure-WindowsCliTerminalCompatibility",
         "exit 0",
     ]
     return "\n".join(lines) + "\n"
@@ -2401,7 +2717,7 @@ def ensure_ollama_via_winget(log: Callable[[str], None]) -> tuple[bool, Optional
 def _windows_app_install_folder_names(spec: CliSpec) -> list[str]:
     return {
         "vscode": ["Microsoft VS Code"],
-        "antigravity": ["Antigravity"],
+        "antigravity": ["Antigravity", "antigravity"],
         "antigravity_ide": ["Antigravity IDE", "AntigravityIDE"],
     }.get(spec.key, [])
 
@@ -2455,6 +2771,8 @@ def get_app_cli_bin_dirs(spec: CliSpec, log: Callable[[str], None]) -> list[str]
             roots.append(os.path.join(program_files, folder))
             roots.append(os.path.join(program_files_x86, folder))
             for root in roots:
+                if spec.key in ("antigravity", "antigravity_ide"):
+                    dirs.append(root)
                 dirs.append(os.path.join(root, "bin"))
     elif is_linux():
         home = os.path.expanduser("~")
@@ -4960,6 +5278,9 @@ class InstallerFrame(wx.Frame):
             self.log(
                 "System PATH update may fail without Administrator/root privileges."
             )
+        if is_windows():
+            self.set_status("Repairing Windows terminal compatibility")
+            ensure_windows_terminal_compatibility(self.log)
         needs_python_cli_dirs = any(spec.key == "mistral" for spec in selected)
         needs_ollama_cli_dirs = any(spec.key == "ollama" for spec in selected)
         needs_rtk_cli_dirs = any(spec.key == "rtk" for spec in selected)
@@ -5120,6 +5441,10 @@ class InstallerFrame(wx.Frame):
             self.log(f"System PATH refresh warning: {system_err}")
         elif added_system:
             self.log("Added to system PATH (post-install): " + ", ".join(added_system))
+
+        if is_windows():
+            self.set_status("Repairing Windows terminal compatibility")
+            ensure_windows_terminal_compatibility(self.log)
 
         self.set_status("Configuring auto-updates")
         self.set_gauge(90)

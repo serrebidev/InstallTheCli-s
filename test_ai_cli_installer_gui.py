@@ -178,6 +178,39 @@ class UtilityFunctionTests(unittest.TestCase):
         with patch.object(m.os, "name", "posix"):
             self.assertEqual(m.subprocess_creationflags_kwargs(), {})
 
+    def test_windows_terminal_compatibility_script_contains_expected_repairs(self) -> None:
+        script = m.build_windows_terminal_compatibility_script()
+        self.assertIn("Remove-StaleAiCliProfileShims", script)
+        self.assertIn("INSTALLTHECLI WINDOWS POWERSHELL MODULEPATH GUARD", script)
+        self.assertIn("Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned", script)
+        self.assertIn("Ensure-WindowsCliPathEntries", script)
+        self.assertIn("Send-WindowsEnvironmentChanged", script)
+        self.assertIn("Join-Path $env:APPDATA 'npm'", script)
+        self.assertIn("Join-Path $env:LOCALAPPDATA 'agy\\bin'", script)
+        self.assertIn("Join-Path $env:USERPROFILE '.cargo\\bin'", script)
+        self.assertIn("'Antigravity', 'antigravity'", script)
+        self.assertIn("Programs\\Python", script)
+        self.assertIn("Unblock-File", script)
+        self.assertIn("CodexSandboxUsers", script)
+        self.assertIn("WindowsPowerShell\\profile.ps1", script)
+        self.assertIn("PowerShell\\Microsoft.PowerShell_profile.ps1", script)
+
+    def test_ensure_windows_terminal_compatibility_runs_hidden_powershell(self) -> None:
+        logs: list[str] = []
+        completed = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "subprocess_creationflags_kwargs", return_value={"creationflags": 123}),
+            patch.object(m.subprocess, "run", return_value=completed) as run_mock,
+        ):
+            m.ensure_windows_terminal_compatibility(logs.append)
+
+        args = run_mock.call_args.args[0]
+        self.assertEqual(args[:4], ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass"])
+        self.assertIn("Ensure-WindowsCliTerminalCompatibility", args[-1])
+        self.assertEqual(run_mock.call_args.kwargs["creationflags"], 123)
+        self.assertTrue(any("Repairing Windows terminal compatibility" in line for line in logs))
+
     def test_grok_spec_uses_vibe_kit_package(self) -> None:
         grok = next(spec for spec in m.CLI_SPECS if spec.key == "grok")
         self.assertEqual(grok.package_candidates, ("@vibe-kit/grok-cli",))
@@ -585,6 +618,7 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("copilot/openclaw/ironclaw/mistral", script)
         self.assertIn("setup-updater", script)
         self.assertIn("--no-update-notifier", script)
+        self.assertIn("2>&1 | ForEach-Object { Write-Host $_ }", script)
         self.assertIn("if (-not $DryRun)", script)
         self.assertIn("Get-NpmPath", script)
         self.assertIn('i -g ("$pkg@latest")', script)
@@ -628,7 +662,22 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("Google.AntigravityIDE", script)
         self.assertIn("install.ps1", script)
         self.assertIn("Microsoft.VisualStudioCode", script)
-        self.assertNotIn("gemini", script.lower())
+        self.assertIn("Ensure-WindowsCliTerminalCompatibility", script)
+        self.assertIn("Remove-StaleAiCliProfileShims", script)
+        self.assertIn("INSTALLTHECLI WINDOWS POWERSHELL MODULEPATH GUARD", script)
+        self.assertIn("Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned", script)
+        self.assertIn("Ensure-WindowsCliPathEntries", script)
+        self.assertIn("Send-WindowsEnvironmentChanged", script)
+        self.assertIn("Join-Path $env:APPDATA 'npm'", script)
+        self.assertIn("Join-Path $env:LOCALAPPDATA 'agy\\bin'", script)
+        self.assertIn("Join-Path $env:USERPROFILE '.cargo\\bin'", script)
+        self.assertIn("'Antigravity', 'antigravity'", script)
+        self.assertIn("Programs\\Python", script)
+        self.assertIn("Unblock-File", script)
+        self.assertIn("CodexSandboxUsers", script)
+        self.assertIn("if ($isCodexPackage -and -not $DryRun)", script)
+        self.assertIn("Dry-run: would close Codex CLI before npm update", script)
+        self.assertNotIn("@google/gemini-cli", script.lower())
 
 
 class RegistryAndWindowsTests(unittest.TestCase):
@@ -2258,8 +2307,8 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
         # call must be a bare statement, not part of the foreach loop.
         eager_marker = "Repair-ClaudeAfterFailedUpdate\n$packagesFile ="
         self.assertIn(eager_marker, script)
-        # The Gemini CLI (and its npm shim regen) was removed; ensure no fossils remain.
-        self.assertNotIn("gemini", script.lower())
+        # The Gemini CLI package/updater was removed; only stale profile cleanup may mention it.
+        self.assertNotIn("@google/gemini-cli", script.lower())
 
     def test_build_cli_auto_update_vbs_runs_powershell_hidden(self) -> None:
         vbs = m.build_cli_auto_update_vbs(
@@ -2480,6 +2529,11 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
 
 
 class NodeInstallAndWorkflowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._terminal_compat_patch = patch.object(m, "ensure_windows_terminal_compatibility")
+        self.terminal_compat_mock = self._terminal_compat_patch.start()
+        self.addCleanup(self._terminal_compat_patch.stop)
+
     def test_brew_package_helpers_install_upgrade_and_uninstall(self) -> None:
         with patch.object(m, "_probe_command", return_value=types.SimpleNamespace(returncode=0)):
             self.assertTrue(m.brew_package_installed("/opt/homebrew/bin/brew", "codex", cask=True))
@@ -4178,7 +4232,7 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn("--branch', 'master', '--force'", script)
         self.assertIn("rtk-ai/rtk", script)
         self.assertIn("Update-Rtk", script)
-        self.assertNotIn("Gemini", script)
+        self.assertNotIn("@google/gemini-cli", script)
         self.assertIn("'antigravity','hermes'", script)
         self.assertIn("--copilot", script)
         self.assertIn("'--agent', $agent", script)
@@ -4190,6 +4244,12 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn("$up.Substring(0,1).ToLower()", script)
         self.assertIn("/.cargo/bin/rtk.exe", script)
         self.assertIn("$rtkPosix hook claude", script)
+        self.assertIn("Ensure-WindowsCliTerminalCompatibility", script)
+        self.assertIn("Ensure-WindowsCliPathEntries", script)
+        self.assertIn("Send-WindowsEnvironmentChanged", script)
+        self.assertIn("Remove-StaleAiCliProfileShims", script)
+        self.assertIn("INSTALLTHECLI WINDOWS POWERSHELL MODULEPATH GUARD", script)
+        self.assertIn("CodexSandboxUsers", script)
 
     def test_windows_gui_auto_update_script_rebuilds_rtk(self) -> None:
         script = m.build_cli_auto_update_script(r"C:\Program Files\nodejs\npm.cmd", r"C:\packages.txt")
@@ -4203,11 +4263,18 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn(".claude\\settings.json", script)
         self.assertIn("Install-RtkBashShim", script)
         self.assertIn("'rtk hook claude'", script)
-        self.assertNotIn("Gemini", script)
+        self.assertNotIn("@google/gemini-cli", script)
         self.assertIn("'antigravity','hermes'", script)
         self.assertIn("--copilot", script)
         self.assertIn("'--agent',$agent", script)
         self.assertIn("Get-Process -Name 'rtk'", script)
+        self.assertIn("Ensure-WindowsCliTerminalCompatibility", script)
+        self.assertIn("Ensure-WindowsCliPathEntries", script)
+        self.assertIn("Send-WindowsEnvironmentChanged", script)
+        self.assertIn("Remove-StaleAiCliProfileShims", script)
+        self.assertIn("INSTALLTHECLI WINDOWS POWERSHELL MODULEPATH GUARD", script)
+        self.assertIn("Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned", script)
+        self.assertIn("CodexSandboxUsers", script)
 
     def test_macos_gui_auto_update_script_rebuilds_rtk(self) -> None:
         script = m.build_macos_cli_auto_update_script()
@@ -4526,6 +4593,15 @@ class AntigravityVSCodeInstallTests(unittest.TestCase):
         with patch.object(m, "is_windows", return_value=True), patch.object(m, "is_linux", return_value=False), patch.object(m, "is_macos", return_value=False), patch.dict(m.os.environ, {"LocalAppData": r"C:\Users\u\AppData\Local"}), patch.object(m.os.path, "isdir", return_value=True):
             dirs = m.get_app_cli_bin_dirs(self._spec("antigravity"), lambda _m: None)
         self.assertTrue(any("Antigravity" in d for d in dirs))
+        self.assertTrue(any(d.endswith(r"Programs\Antigravity") for d in dirs))
+        self.assertTrue(any(d.endswith(r"Programs\Antigravity\bin") for d in dirs))
+
+        def only_lowercase_antigravity_exists(path: str) -> bool:
+            return path.endswith(r"Programs\antigravity") or path.endswith(r"Programs\antigravity\bin")
+
+        with patch.object(m, "is_windows", return_value=True), patch.object(m, "is_linux", return_value=False), patch.object(m, "is_macos", return_value=False), patch.dict(m.os.environ, {"LocalAppData": r"C:\Users\u\AppData\Local"}), patch.object(m.os.path, "isdir", side_effect=only_lowercase_antigravity_exists):
+            dirs = m.get_app_cli_bin_dirs(self._spec("antigravity"), lambda _m: None)
+        self.assertIn(r"C:\Users\u\AppData\Local\Programs\antigravity", dirs)
         with patch.object(m, "is_windows", return_value=False), patch.object(m, "is_linux", return_value=True), patch.object(m, "is_macos", return_value=False), patch.object(m, "is_admin", return_value=True), patch.object(m.os.path, "isdir", return_value=True):
             dirs = m.get_app_cli_bin_dirs(self._spec("antigravity"), lambda _m: None)
         self.assertIn("/usr/local/bin", dirs)
