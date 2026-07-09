@@ -1496,9 +1496,10 @@ function Test-ClaudeCliRunning {
 # bin/claude.exe.old.<ts> before swapping in a new binary. If the swap fails
 # (claude running -> EBUSY, missing platform package, interrupted download),
 # the install is left with no claude.exe and an orphan .old file. Restore the
-# latest .old when claude.exe is missing; if no orphan is available but the
-# native-arch package is, copy from there; clean up stale .old files (each
-# ~250MB) once claude.exe is healthy.
+# latest .old when claude.exe is missing; if no orphan is available, or
+# claude.exe exists only as a tiny broken placeholder, copy from the
+# native-arch package; clean up stale .old files (each ~250MB) once
+# claude.exe is healthy.
 function Repair-ClaudeAfterFailedUpdate {
   if (-not $npmPath) { return }
   try {
@@ -1521,7 +1522,14 @@ function Repair-ClaudeAfterFailedUpdate {
         } catch { }
       }
     }
-    if (-not (Test-Path -LiteralPath $claudeExe)) {
+    $needsNativeCopy = -not (Test-Path -LiteralPath $claudeExe)
+    if (-not $needsNativeCopy) {
+      try {
+        $current = Get-Item -LiteralPath $claudeExe -ErrorAction Stop
+        if ($current.Length -lt 1048576) { $needsNativeCopy = $true }
+      } catch { }
+    }
+    if ($needsNativeCopy) {
       $nativeCandidates = @(
         (Join-Path $pkgDir 'node_modules\@anthropic-ai\claude-code-win32-x64\claude.exe'),
         (Join-Path $pkgDir 'node_modules\@anthropic-ai\claude-code-win32-arm64\claude.exe')

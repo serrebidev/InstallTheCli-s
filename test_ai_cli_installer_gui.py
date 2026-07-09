@@ -224,13 +224,14 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("official", ollama.help_text.lower())
         self.assertEqual(ollama.macos_brew_formula, "ollama")
 
-    def test_codex_desktop_app_spec_uses_msstore_product_id(self) -> None:
-        codex_app = next(spec for spec in m.GUI_APP_SPECS if spec.key == "codex_app")
-        self.assertEqual(codex_app.winget_id, "9PLM9XGG6VKS")
-        self.assertEqual(codex_app.winget_source, "msstore")
-        self.assertIsNone(codex_app.windows_browser_url)
-        self.assertEqual(codex_app.macos_brew_cask, "codex-app")
-        self.assertEqual(codex_app.macos_browser_url, "https://openai.com/codex/")
+    def test_chatgpt_desktop_app_spec_uses_codex_replacement_msstore_product_id(self) -> None:
+        chatgpt_app = next(spec for spec in m.GUI_APP_SPECS if spec.key == "chatgpt_app")
+        self.assertEqual(chatgpt_app.winget_id, "9PLM9XGG6VKS")
+        self.assertEqual(chatgpt_app.winget_source, "msstore")
+        self.assertIsNone(chatgpt_app.windows_browser_url)
+        self.assertEqual(chatgpt_app.macos_brew_cask, "chatgpt")
+        self.assertEqual(chatgpt_app.macos_browser_url, "https://chatgpt.com")
+        self.assertIn("Codex", chatgpt_app.help_text)
 
     def test_macos_specs_use_homebrew_or_official_installers(self) -> None:
         by_key = {spec.key: spec for spec in m.CLI_SPECS}
@@ -252,7 +253,6 @@ class UtilityFunctionTests(unittest.TestCase):
         apps = {spec.key: spec for spec in m.GUI_APP_SPECS}
         self.assertEqual(apps["claude_app"].macos_brew_cask, "claude")
         self.assertEqual(apps["chatgpt_app"].macos_brew_cask, "chatgpt")
-        self.assertEqual(apps["codex_app"].macos_brew_cask, "codex-app")
         self.assertEqual(apps["gemini_app"].macos_brew_cask, "google-gemini")
         self.assertEqual(apps["copilot_app"].macos_browser_url, "https://copilot.microsoft.com")
 
@@ -639,6 +639,7 @@ class UtilityFunctionTests(unittest.TestCase):
         # Native-arch fallback covers the case where the .old orphan is gone
         # but the optional native package is still on disk (e.g. winget
         # upgrade of the Claude desktop app left this state behind).
+        self.assertIn("$current.Length -lt 1048576", script)
         self.assertIn("claude-code-win32-x64", script)
         self.assertIn("claude-code-win32-arm64", script)
         # Embedded updater calls the repair eagerly at script start so that
@@ -1628,6 +1629,34 @@ class CommandAndDetectionTests(unittest.TestCase):
                 self.assertEqual(f.read(), "native-binary")
             self.assertTrue(any("copying from native package" in line for line in logs))
 
+    def test_repair_claude_after_failed_update_replaces_tiny_broken_exe(self) -> None:
+        logs: list[str] = []
+        with tempfile.TemporaryDirectory() as prefix:
+            pkg_dir = os.path.join(prefix, "node_modules", "@anthropic-ai", "claude-code")
+            bin_dir = os.path.join(pkg_dir, "bin")
+            native_dir = os.path.join(
+                pkg_dir, "node_modules", "@anthropic-ai", "claude-code-win32-x64"
+            )
+            os.makedirs(bin_dir)
+            os.makedirs(native_dir)
+            claude_exe = os.path.join(bin_dir, "claude.exe")
+            native_exe = os.path.join(native_dir, "claude.exe")
+            with open(claude_exe, "w", encoding="utf-8") as f:
+                f.write("tiny")
+            with open(native_exe, "w", encoding="utf-8") as f:
+                f.write("native-binary")
+
+            with (
+                patch.object(m, "is_windows", return_value=True),
+                patch.object(m, "get_npm_global_prefix", return_value=prefix),
+            ):
+                healthy = m.repair_claude_after_failed_update("npm.cmd", logs.append)
+
+            self.assertTrue(healthy)
+            with open(claude_exe, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "native-binary")
+            self.assertTrue(any("unexpectedly small" in line for line in logs))
+
     def test_refresh_existing_cli_auto_update_task_skips_when_no_task_or_state(self) -> None:
         logs: list[str] = []
         with (
@@ -2136,7 +2165,7 @@ class CommandAndDetectionTests(unittest.TestCase):
             self.assertTrue(m.is_gui_app_installed(spec))
 
     def test_install_gui_app_winget_uses_source_when_configured(self) -> None:
-        spec = next(item for item in m.GUI_APP_SPECS if item.key == "codex_app")
+        spec = next(item for item in m.GUI_APP_SPECS if item.key == "chatgpt_app")
         with (
             patch.object(m, "find_winget", return_value="winget.exe"),
             patch.object(m, "run_command", return_value=0) as run_mock,
@@ -2299,6 +2328,7 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
         # orphan can be restored, copy from the bundled platform package.
         # This handles cleanup-leftover or partial-postinstall states where
         # the orphan-based recovery alone is not enough.
+        self.assertIn("$current.Length -lt 1048576", script)
         self.assertIn("claude-code-win32-x64", script)
         self.assertIn("claude-code-win32-arm64", script)
         # Eager invocation: the recovery must run BEFORE the package list is

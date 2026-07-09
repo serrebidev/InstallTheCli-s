@@ -310,29 +310,28 @@ GUI_APP_SPECS: tuple[GuiAppSpec, ...] = (
     GuiAppSpec(
         key="claude_app",
         label="Claude App (Desktop)",
-        help_text="Installs Anthropic Claude consumer desktop app (Windows: winget; Linux: Flatpak from Flathub).",
+        help_text=(
+            "Installs the modern Anthropic Claude desktop app "
+            "(Windows: winget Anthropic.Claude; Linux: Flatpak from Flathub)."
+        ),
         winget_id="Anthropic.Claude",
+        winget_source="winget",
         flatpak_id="ai.anthropic.Claude",
         macos_brew_cask="claude",
     ),
     GuiAppSpec(
         key="chatgpt_app",
         label="ChatGPT App (Desktop)",
-        help_text="Installs OpenAI ChatGPT consumer desktop app (Windows: winget; Linux: browser shortcut to chat.openai.com).",
-        winget_id="OpenAI.ChatGPT",
+        help_text=(
+            "Installs the new OpenAI ChatGPT desktop app with Chat, ChatGPT Work, "
+            "and Codex (Windows: Microsoft Store Product ID 9PLM9XGG6VKS; "
+            "Linux: browser shortcut to chatgpt.com)."
+        ),
+        winget_id="9PLM9XGG6VKS",
+        winget_source="msstore",
         linux_browser_url="https://chat.openai.com",
         macos_brew_cask="chatgpt",
         macos_browser_url="https://chatgpt.com",
-    ),
-    GuiAppSpec(
-        key="codex_app",
-        label="Codex App (Desktop)",
-        help_text="Installs Codex desktop app (Windows: Microsoft Store Product ID 9PLM9XGG6VKS; macOS: Homebrew cask).",
-        winget_id="9PLM9XGG6VKS",
-        winget_source="msstore",
-        macos_brew_cask="codex-app",
-        macos_browser_url="https://openai.com/codex/",
-        optional=True,
     ),
     GuiAppSpec(
         key="gemini_app",
@@ -1116,10 +1115,18 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "        } catch { }",
         "      }",
         "    }",
-        # Fallback: if claude.exe is still missing, copy from the optional
-        # native-arch package bundled under node_modules/. The .old file may
-        # already be gone (cleaned up earlier), or the rename half completed.
-        "    if (-not (Test-Path -LiteralPath $claudeExe)) {",
+        # Fallback: if claude.exe is still missing OR is an implausibly tiny
+        # broken placeholder, copy from the optional native-arch package
+        # bundled under node_modules/. The .old file may already be gone
+        # (cleaned up earlier), or the rename half completed.
+        "    $needsNativeCopy = -not (Test-Path -LiteralPath $claudeExe)",
+        "    if (-not $needsNativeCopy) {",
+        "      try {",
+        "        $current = Get-Item -LiteralPath $claudeExe -ErrorAction Stop",
+        "        if ($current.Length -lt 1048576) { $needsNativeCopy = $true }",
+        "      } catch { }",
+        "    }",
+        "    if ($needsNativeCopy) {",
         "      $nativeCandidates = @(",
         "        (Join-Path $pkgDir 'node_modules\\@anthropic-ai\\claude-code-win32-x64\\claude.exe'),",
         "        (Join-Path $pkgDir 'node_modules\\@anthropic-ai\\claude-code-win32-arm64\\claude.exe')",
@@ -2142,11 +2149,23 @@ def repair_claude_after_failed_update(npm_exe: str, log: Callable[[str], None]) 
             log(f"Warning: could not restore Claude CLI executable: {exc}")
 
     # Fall back to copying from the optional native-arch package when the
-    # bin/claude.exe is still missing (e.g. the .old file is gone, or the
-    # rename succeeded but the new download never landed). The native
-    # package ships the same Win32 binary that the postinstall normally
-    # hard-links into bin/claude.exe.
-    if not os.path.isfile(claude_exe):
+    # bin/claude.exe is still missing or exists only as an implausibly tiny
+    # broken placeholder (e.g. the .old file is gone, or the rename succeeded
+    # but the new download never landed). The native package ships the same
+    # Win32 binary that the postinstall normally hard-links into bin/claude.exe.
+    needs_native_copy = not os.path.isfile(claude_exe)
+    if not needs_native_copy:
+        try:
+            size = os.path.getsize(claude_exe)
+            if size < 1024 * 1024:
+                log(
+                    "Claude CLI executable is unexpectedly small "
+                    f"({size} bytes); restoring from native package."
+                )
+                needs_native_copy = True
+        except OSError as exc:
+            log(f"Warning: could not stat Claude CLI executable: {exc}")
+    if needs_native_copy:
         native_candidates = (
             os.path.join(
                 pkg_dir, "node_modules", "@anthropic-ai", "claude-code-win32-x64", "claude.exe"

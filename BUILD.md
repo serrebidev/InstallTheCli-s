@@ -17,8 +17,8 @@ build.bat release
 - Release from `master`.
 - Use `build.bat release` for official releases.
 - GitHub releases must be published, never drafts.
-- The release script explicitly marks the new release as latest and non-draft.
-- The release script removes any remaining draft releases after publishing.
+- The release script explicitly marks the new release as latest and non-draft, and re-verifies that via `gh release view`.
+- It never touches other releases; clean up old drafts manually by exact tag.
 - Do not ship if the build shows unresolved warnings, errors, or dependency mismatches.
 
 ## Output

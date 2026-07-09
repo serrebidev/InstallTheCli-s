@@ -1,284 +1,88 @@
 # InstallTheCli
 
-I know the name is boring. This project installs a bunch of AI CLIs so you do not have to do it manually.
+A vibe-coded installer for Windows, macOS, and Linux that sets up all the popular AI CLIs and desktop AI apps in one go, then keeps them updated in the background — so you never have to do it manually.
 
-It supports:
-- Windows (GUI app + one-click PowerShell script)
-- macOS (GUI app + one-click Bash script using Homebrew/official installers)
-- Linux: Debian, Ubuntu, Fedora, Arch (one-click Bash script, plus Linux support in the GUI app)
+[![Join SerrebiProjects on Telegram](https://img.shields.io/badge/Telegram-SerrebiProjects-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/SerrebiProjects)
 
-## What It Installs
+**Have a question, hit a bug, or want early word on new releases?** Join the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects) — the community hub for InstallTheCli and my other projects, and the fastest place to get help.
 
-By default it can install:
-- Claude CLI
-- Codex CLI
-- Antigravity 2.0 (Google's agentic IDE + `antigravity` CLI; Windows winget, macOS Homebrew cask, Linux official tar.gz)
-- Antigravity CLI (standalone `agy` CLI; Windows/macOS/Linux official script install)
-- Antigravity IDE (Antigravity IDE; Windows winget, macOS Homebrew cask)
-- Visual Studio Code (`code` CLI; Windows winget, macOS Homebrew cask, Linux official .deb/.rpm/tar.gz)
-- Grok CLI (`@vibe-kit/grok-cli`)
-- Qwen CLI
-- GitHub Copilot CLI
-- OpenClaw CLI (`openclaw`)
-- IronClaw CLI (`ironclaw`)
-- Mistral Vibe CLI (`mistral-vibe`)
-- Ollama (official version + `ollama` CLI)
-- RTK (Rust Token Killer, `rtk-ai/rtk` from git master via cargo) — opt-in, requires `install rtk`
+## Features
 
-From the GUI, it can also install desktop AI apps (or shortcuts), including:
-- Claude App
-- ChatGPT App
-- Codex App (Microsoft Store app via `9PLM9XGG6VKS`)
-- Gemini App
-- Microsoft Copilot App
-- Perplexity App
+- Installs the popular AI CLIs: Claude, Codex, Antigravity 2.0, Antigravity CLI (`agy`), Antigravity IDE, Visual Studio Code, Grok, Qwen, GitHub Copilot, OpenClaw, IronClaw, Mistral Vibe, Ollama, and RTK (Rust Token Killer, built from `rtk-ai/rtk` git master via cargo).
+- Installs desktop AI apps from the GUI: Claude, ChatGPT (the new app with Chat, ChatGPT Work, and Codex), Gemini, Microsoft Copilot, and Perplexity.
+- Works three ways: a GUI app, a one-click PowerShell script on Windows, and one-click Bash scripts on macOS and Linux (Debian, Ubuntu, Fedora, Arch).
+- Installs prerequisites for you when missing: Node.js/npm, Python 3.14 (Windows), pip/uv, and Homebrew on macOS (it asks first).
+- Adds CLI directories to PATH and creates desktop shortcuts.
+- Sets up silent background auto-updates: a hidden Scheduled Task on Windows (startup, logon, and daily — no popup windows), a LaunchAgent on macOS, and cron on Linux.
+- Repairs broken installs automatically — for example a Claude CLI left half-updated by an interrupted upgrade is restored on the next updater run.
+- Uses official sources: winget, Homebrew, npm, Microsoft Store, and vendor installer scripts.
 
-## What It Changes On Your System
+## Download and install
 
-It does real system changes. Here they are.
+Grab the latest build from the [Releases page](https://github.com/serrebidev/InstallTheCli-s/releases).
 
-It may:
-- install Node.js / npm (if missing)
-- install Python 3.14 on Windows (for Mistral Vibe, if needed)
-- install `pip` / `uv` for Mistral Vibe (if needed)
-- install Ollama (official source)
-- add CLI directories to your PATH
-- create Desktop shortcuts
-- create background auto-update jobs
+**Windows GUI (recommended)**
 
-Auto-update jobs:
-- Windows: hidden Scheduled Task (startup + logon + daily)
-- macOS: LaunchAgent (RunAtLoad + daily)
-- Linux: cron (`@reboot` + daily)
+1. Download `InstallTheCli-vX.Y.Z.exe` (or the `.zip` and extract it).
+2. Run it — as Administrator for best results (system PATH writes and installers). Tick what you want, click install.
 
-## Windows (GUI)
+**Windows one-click script**
 
-Run the built EXE:
-- `dist\InstallTheCli.exe`
+Download `install_all_windows.ps1` from the same release, then:
 
-Run the Python GUI directly from terminal:
-- `.\run_gui.ps1` (PowerShell)
-- `run_gui.cmd` (cmd/PowerShell)
-- or `py -3.14 .\ai_cli_installer_gui.py`
-
-What it does:
-- installs selected CLIs
-- updates PATH
-- creates shortcuts
-- can create a hidden auto-update task (toggle in the UI)
-
-Notes:
-- Run as Administrator for best results (system PATH writes and installers).
-- Non-admin runs still work for many cases, but you may get warnings.
-
-## Windows (One-Click PowerShell)
-
-Use this if you want CLI/scriptable install instead of the GUI.
-
-Help:
 ```powershell
-.\install_all_windows.ps1 help
-Get-Help .\install_all_windows.ps1 -Detailed
-```
-
-List targets:
-```powershell
-.\install_all_windows.ps1 list
-```
-
-Install everything:
-```powershell
-.\install_all_windows.ps1
-```
-
-Install one thing:
-```powershell
+.\install_all_windows.ps1              # install everything
+.\install_all_windows.ps1 list         # list targets
 .\install_all_windows.ps1 install codex
-.\install_all_windows.ps1 install mistral
-.\install_all_windows.ps1 install ollama
-```
-
-Only configure the hidden updater task:
-```powershell
 .\install_all_windows.ps1 setup-updater
+.\install_all_windows.ps1 help
 ```
 
-Useful flags:
-- `-DryRun` (prints commands only)
-- `-NoAutoUpdate` (skip hidden updater task)
-- `-AutoUpdateTime "3:00AM"` (change daily run time)
+Useful flags: `-DryRun`, `-NoAutoUpdate`, `-AutoUpdateTime "3:00AM"`.
 
-## macOS (GUI + One-Click Bash)
+**macOS**
 
-macOS installs use Homebrew wherever a formula or cask exists. If Homebrew is missing, the GUI and script ask before installing it with the official Homebrew installer.
+Download `install_all_macos.sh` (or the `…-macos.zip` GUI build). Installs are Homebrew-first; if Homebrew is missing you are asked before it gets installed.
 
-Run the Python GUI directly:
 ```bash
-python3 ai_cli_installer_gui.py
-```
-
-Run the one-click script:
-```bash
-./install_all_macos.sh
-```
-
-Help:
-```bash
-./install_all_macos.sh help
-```
-
-List targets:
-```bash
+./install_all_macos.sh                 # install everything
 ./install_all_macos.sh list
-```
-
-Install one thing:
-```bash
 ./install_all_macos.sh install codex
-./install_all_macos.sh install openclaw
-./install_all_macos.sh install mistral --no-launch-agent
-```
-
-Only configure the LaunchAgent updater:
-```bash
 ./install_all_macos.sh setup-launch-agent
 ```
 
-Useful flags:
-- `--dry-run`
-- `--no-launch-agent`
+Useful flags: `--dry-run`, `--no-launch-agent`.
 
-macOS install sources:
-- Homebrew casks: Claude Code, Codex CLI, GitHub Copilot CLI, Antigravity, Antigravity IDE, Visual Studio Code
-- Homebrew formulae: Qwen CLI, Mistral Vibe CLI, Ollama, IronClaw
-- npm via Homebrew Node.js where needed: Grok CLI
-- official installer: OpenClaw (checks Node.js 22.14+)
+**Linux (Debian, Ubuntu, Fedora, Arch)**
 
-## Linux (One-Click Bash)
+Download `install_all_linux.sh` (or the `…-linux.tar.gz` GUI build).
 
-This is the easiest Linux path. Use this instead of clicking around.
-
-Supported distros:
-- Debian
-- Ubuntu
-- Fedora
-- Arch
-
-Run:
 ```bash
-sudo bash install_all_linux.sh
-```
-
-Help:
-```bash
-./install_all_linux.sh help
-```
-
-List targets:
-```bash
+sudo bash install_all_linux.sh         # install everything
 ./install_all_linux.sh list
-```
-
-Install one thing:
-```bash
 sudo bash install_all_linux.sh install codex
-sudo bash install_all_linux.sh install mistral --no-cron
-sudo bash install_all_linux.sh install ollama
-```
-
-Convenience alias:
-```bash
-sudo bash install_all_linux.sh codex
-```
-
-Only configure the cron updater:
-```bash
 sudo bash install_all_linux.sh setup-cron
 ```
 
-Useful flags:
-- `--dry-run`
-- `--no-cron`
-- `--cron-time "0 3 * * *"`
+Useful flags: `--dry-run`, `--no-cron`, `--cron-time "0 3 * * *"`.
 
-## Auto-Updates (Background)
+## Auto-updates
 
-This project can keep installed CLIs updated in the background.
+Once set up, updates run silently in the background:
 
-### Windows
+- Windows: hidden Scheduled Task `InstallTheCli - Update AI CLIs` (startup, logon, daily at 3:00AM by default). Files live under `%LocalAppData%\InstallTheCli\`.
+- macOS: LaunchAgent `com.installthecli.ai-cli-updates` (login and daily). Updates Homebrew formulae/casks and globally installed npm CLIs.
+- Linux: cron (`@reboot` and daily). Log at `/var/log/installthecli-linux-update.log`.
 
-Task name:
-- `InstallTheCli - Update AI CLIs`
+## Quick sanity check after install
 
-Behavior:
-- hidden task
-- runs at startup, logon, and daily
-- no popup console window
-- invokes a small `.vbs` wrapper through `wscript.exe`, which launches the PowerShell updater hidden
-- npm CLIs are refreshed with `npm install -g <package>@latest`
-- Codex CLI updates close running Codex processes first so npm can replace `codex.exe`, then clean stale `.codex-*` npm temp directories
-- Claude CLI updates are skipped while `claude.exe` is running. If a prior update was interrupted and left `bin/claude.exe.old.<timestamp>` without a current `claude.exe`, the latest `.old` is restored automatically; once `claude.exe` is healthy, leftover `.old.*` files are deleted
-
-Files written under:
-- `%LocalAppData%\InstallTheCli\`
-
-### Linux
-
-Files:
-- `/usr/local/bin/installthecli-linux-update.sh`
-- `/etc/cron.d/installthecli-ai-cli-updates`
-- `/var/log/installthecli-linux-update.log`
-
-Behavior:
-- runs on reboot and daily
-- non-interactive cron job
-- npm CLIs are refreshed with `npm install -g <package>@latest`
-
-### macOS
-
-Files:
-- `~/Library/Application Support/InstallTheCli/auto_update_clis_macos.sh`
-- `~/Library/LaunchAgents/com.installthecli.ai-cli-updates.plist`
-- `~/Library/Application Support/InstallTheCli/macos_auto_update.log`
-
-Behavior:
-- runs at login/load and daily
-- updates installed Homebrew formulae/casks
-- refreshes npm CLIs only when those npm packages are globally installed
-
-## Build From Source (Windows)
-
-Requirements:
-- Python 3.14
-- `wxPython` (`pip install -r requirements.txt`)
-- PyInstaller installed in that Python environment
-
-Install deps:
-```powershell
-py -3.14 -m pip install -r requirements.txt
-py -3.14 -m pip install pyinstaller coverage
-```
-
-Run tests:
-```powershell
-py -3.14 -m unittest -q test_ai_cli_installer_gui.py
-```
-
-Build EXE:
-```powershell
-cmd /c build_exe.bat
-```
-
-
-
-## Quick Sanity Check After Install
-
-Open a new shell and run:
+Open a new shell and try the commands you installed:
 
 ```text
 claude
 codex
 antigravity
+agy
 code
 grok
 qwen
@@ -292,6 +96,22 @@ rtk
 
 If one fails, rerun the installer for that target only.
 
-##Submit bugs in issues, or join my Telegram group!
-(https://t.me/SerrebiProjects)
+## Run from source (any OS)
 
+1. Install Python 3.14.
+2. Install dependencies: `pip install -r requirements.txt`
+3. Launch it: `python ai_cli_installer_gui.py` (on Windows: `.\run_gui.ps1` or `py -3.14 .\ai_cli_installer_gui.py`)
+
+Run the tests with `py -3.14 -m unittest -q test_ai_cli_installer_gui.py`.
+
+## Building
+
+See [`BUILD.md`](BUILD.md) for the full release pipeline — PyInstaller packaging, release staging, and the Linux/macOS CI builds.
+
+## Contributing
+
+Pull requests are welcome. If InstallTheCli has been useful to you, open a PR with a fix or feature and I'll review it.
+
+## Community and support
+
+Report bugs and request features in [Issues](https://github.com/serrebidev/InstallTheCli-s/issues). For questions, feedback, and release news, join the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects).

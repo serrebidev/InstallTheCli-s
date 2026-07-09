@@ -1,227 +1,223 @@
-# AGENTS.md
+# InstallTheCli Architecture & Dev Guide
 
-This file is for coding agents working in this repo.
+## Working Agreement (read first)
+- Treat this file as the project source of truth. If code and this guide disagree,
+  verify the code, fix the guide, and keep the operational rule here.
+- Install whatever you need to get the job done.
+- Debug and test your changes; add or extend tests in `test_ai_cli_installer_gui.py`
+  for any behavior change.
+- Fix any warnings or errors you hit along the way.
+- Keep this file current when something here goes stale.
 
-## What This Project Is
+## System Overview
+- Stack: Python 3.14, wxPython (GUI), PyInstaller (Windows EXE), plus standalone
+  one-click installer scripts (PowerShell + Bash) that share behavior with the GUI.
+- What it is: a Windows/macOS/Linux installer for AI CLIs and desktop AI apps,
+  with hidden background auto-updaters on all three platforms.
+- Entry points:
+  - `ai_cli_installer_gui.py` — the whole app in one file (specs, install logic,
+    updater script generation, GUI). Windows, macOS, and Linux.
+  - `install_all_windows.ps1` — one-click PowerShell installer with subcommands.
+  - `install_all_macos.sh` — one-click macOS installer + LaunchAgent updater.
+  - `install_all_linux.sh` — one-click Linux installer + cron updater.
+  - `test_ai_cli_installer_gui.py` — the entire unit test suite (designed for 100% coverage).
+  - `build_exe.bat` + `InstallTheCli.spec` — Windows EXE build (PyInstaller).
+  - `build.bat` — build/dry-run/release driver. `BUILD.md` has the prose.
 
-Windows/macOS/Linux installer for common AI CLIs.
+## Build & Release
+You should not need to open `build.bat` to cut a release — everything operational is here.
 
-Main entry points:
-- `ai_cli_installer_gui.py` (wxPython GUI; supports Windows, macOS, and Linux)
-- `install_all_windows.ps1` (one-click PowerShell installer with subcommands/help)
-- `install_all_macos.sh` (one-click macOS Bash installer with subcommands/help + LaunchAgent updater)
-- `install_all_linux.sh` (one-click Linux installer with subcommands/help + cron updater)
-- `test_ai_cli_installer_gui.py` (unit tests; high coverage)
-- `build_exe.bat` + `InstallTheCli.spec` (Windows EXE build via PyInstaller)
+### Ship a release (the only path)
+- Run ONE command on Windows: `.\build.bat release`. It does the entire release.
+  Do not hand-pick the version, tag manually, or run `gh release create` yourself.
+- It requires a CLEAN tree (no uncommitted tracked changes, nothing staged). Commit first.
+- Release from `master`; `master` is the default branch.
+- When it exits 0, the release is published as Latest/non-draft, the Windows assets
+  are attached, and the Linux CI asset is confirmed on the release.
 
-## Current Behavior (Do Not Break Quietly)
+### `build.bat` modes
+- `release` — full release, in order: compute next version → `build_exe.bat` →
+  stage versioned EXE/ZIP + SHA256SUMS + the three one-click scripts under
+  `dist\release` → push HEAD → `gh release create` at that exact commit (tag is
+  created WITH the release, never pushed bare, so CI always has a release to
+  upload to) → force `--draft=false --latest` and re-verify via `gh release view`
+  (re-publishes once if the API still shows draft) → wait for the Linux CI build
+  on the tag (up to 30 min) and verify the `-linux.tar.gz` asset landed. Any
+  failed step exits non-zero; fix it, don't bypass.
+- `build` — local build only; delegates to `build_exe.bat`. No git, no GitHub.
+- `dry-run` — prints the next version and planned steps; changes nothing.
 
-Installed CLIs currently include:
-- Claude
-- Codex
-- Antigravity (Google's agentic IDE; ships an `antigravity` CLI)
-- Visual Studio Code (ships a `code` CLI)
-- Grok (`@vibe-kit/grok-cli`)
-- Qwen
-- GitHub Copilot CLI
-- OpenClaw CLI (`openclaw`)
-- IronClaw CLI (`ironclaw`)
-- Mistral Vibe CLI (`mistral-vibe`)
-- Ollama (official install)
+### Version numbers are automatic — never pick them
+- Next version = highest existing `v*.*.*` tag with the patch bumped
+  (`v1.5.16` → `v1.5.17`). No conventional-commit parsing; every release is a
+  patch bump unless you retag the major/minor by hand first (don't).
+- If the tag already exists on origin, `release` refuses. That means someone
+  already released that version — rerun to get the next patch, don't fight the tag.
 
-IDE-style CLIs (Antigravity, Visual Studio Code) are not npm packages. They are
-modeled as `CliSpec`s where `cli_is_app_installer(spec)` is true (i.e. `winget_id`
-or `linux_install_kind` is set) and are installed/uninstalled via `ensure_app_cli`
-/ `uninstall_app_cli`:
+### CI (`.github/workflows/`)
+- `linux-build.yml` and `macos-build.yml` trigger on the `v*` tag and
+  `gh release upload --clobber` their platform binaries onto the release.
+  `build.bat release` gates on Linux only; macOS attaches in parallel, ungated.
+- `windows-build.yml` is validation only (push/PR/dispatch) and NEVER touches
+  releases — build.bat uploads the authoritative Windows assets. Do not add a
+  tag-triggered Windows upload; it would clobber the signed local build.
+- If the Linux gate fails, the release and tag stay in place; rerun the workflow
+  from the Actions tab instead of re-releasing.
+
+### Release assets
+- `InstallTheCli-vX.Y.Z.exe`, `InstallTheCli-vX.Y.Z.zip`,
+  `InstallTheCli-vX.Y.Z-SHA256SUMS.txt` (from build.bat)
+- `install_all_windows.ps1`, `install_all_macos.sh`, `install_all_linux.sh` (from build.bat)
+- `InstallTheCli-vX.Y.Z-linux.tar.gz` (Linux CI), `InstallTheCli-vX.Y.Z-macos.zip` (macOS CI)
+
+### Release rules
+- Publish real releases, never drafts. `build.bat release` enforces and
+  self-verifies this — do not remove the guards.
+- It does NOT delete other draft releases; clean up prior drafts manually by exact tag.
+- Do not ship if the build shows unresolved warnings or errors. Fix, rebuild, confirm gone.
+
+## What It Installs (Do Not Break Quietly)
+
+CLI specs (`CLI_SPECS` in `ai_cli_installer_gui.py`):
+- Claude CLI (`@anthropic-ai/claude-code`, npm; macOS cask `claude-code`)
+- Codex CLI (`@openai/codex`, npm; macOS cask `codex`)
+- Antigravity 2.0 (Google's agentic IDE + `antigravity` CLI; winget / brew cask / Linux tarball)
+- Antigravity CLI (standalone `agy`; Google's official self-updating installer, all platforms)
+- Antigravity IDE (winget `Google.AntigravityIDE` / cask `antigravity-ide`; no Linux; optional)
+- Visual Studio Code (`code` CLI; winget / cask / official .deb/.rpm/tarball)
+- Grok CLI (`@vibe-kit/grok-cli`, npm; optional)
+- Qwen CLI (`@qwen-code/qwen-code`, npm; macOS formula `qwen-code`)
+- Mistral Vibe CLI (pip/uv; macOS formula `mistral-vibe`; optional)
+- Ollama (official only: winget `Ollama.Ollama` / `https://ollama.com/install.sh` / formula)
+- GitHub Copilot CLI (`@github/copilot`, npm; macOS cask `copilot-cli`)
+- OpenClaw CLI (npm; macOS official installer, Node 22.14+; optional)
+- IronClaw CLI (macOS formula; npm fallback elsewhere; optional)
+- RTK (Rust Token Killer; cargo install from `rtk-ai/rtk` git master; optional)
+
+Desktop app specs (`GUI_APP_SPECS`, GUI only):
+- Claude App (winget `Anthropic.Claude` / Flatpak / cask `claude`)
+- ChatGPT App (the NEW desktop app with Chat, ChatGPT Work, and Codex —
+  Microsoft Store Product ID `9PLM9XGG6VKS` via winget `msstore` source; cask
+  `chatgpt`; Linux browser shortcut). This REPLACED the separate Codex App spec;
+  do not resurrect `codex_app` or the old `OpenAI.ChatGPT` winget id.
+- Gemini App, Microsoft Copilot App, Perplexity App (winget/Flatpak/shortcut; optional)
+
+IDE-style CLIs (Antigravity, VS Code) are not npm packages. They are `CliSpec`s
+where `cli_is_app_installer(spec)` is true (`winget_id` or `linux_install_kind`
+set) and go through `ensure_app_cli` / `uninstall_app_cli`:
 - Windows: winget (`Google.Antigravity`, `Microsoft.VisualStudioCode`).
-- macOS: Homebrew casks (`antigravity`, `visual-studio-code`) via the normal
-  `macos_brew_cask` path; both are in `MACOS_BREW_CASK_CLIS` so the LaunchAgent
-  updater upgrades them.
-- Linux: direct download. Antigravity (`linux_install_kind="antigravity_tarball"`)
-  lists the public `antigravity-public` GCS bucket, picks the newest version dir
-  (skipping `dogfood`/`100.0.0`), downloads `linux-x64/Antigravity.tar.gz`, extracts
-  to `/opt/antigravity` (or `~/.local/opt`) and symlinks `antigravity` onto PATH.
-  VS Code (`linux_install_kind="vscode_pkg"`) installs the official `.deb`/`.rpm`
-  from code.visualstudio.com on Debian/Fedora, or the stable tarball under
-  `/opt/visual-studio-code` on other distros.
-- They are NOT added to the npm auto-update package list (their `pkg` is a winget
-  id, not an npm package); the Windows/macOS one-click updaters upgrade them via
-  winget/brew, mirroring how Ollama is handled.
+- macOS: Homebrew casks via the normal `macos_brew_cask` path; both are in
+  `MACOS_BREW_CASK_CLIS` so the LaunchAgent updater upgrades them.
+- Linux: Antigravity (`linux_install_kind="antigravity_tarball"`) lists the
+  public `antigravity-public` GCS bucket, picks the newest version dir (skipping
+  `dogfood`/`100.0.0`), extracts to `/opt/antigravity` (or `~/.local/opt`) and
+  symlinks `antigravity` onto PATH. VS Code (`linux_install_kind="vscode_pkg"`)
+  installs the official `.deb`/`.rpm`, or the stable tarball on other distros.
+- They are NOT in the npm auto-update package list (their `pkg` is a winget id);
+  the Windows/macOS updaters upgrade them via winget/brew, like Ollama.
 - rtk integration: Antigravity is wired via `rtk init -g --agent antigravity`
-  (it is in `RTK_OPTIONAL_INTEGRATIONS` and every updater's agent loop), so it
-  uses rtk like Cursor/Windsurf/etc. There is no per-app `.gemini`-style hook
-  config anymore.
+  (in `RTK_OPTIONAL_INTEGRATIONS` and every updater's agent loop). There is no
+  per-app `.gemini`-style hook config anymore.
 
-Auto-update behavior:
-- Windows GUI / PowerShell script: hidden Scheduled Task (`InstallTheCli - Update AI CLIs`)
-  - Triggers: startup, logon, daily (`3:00AM` default)
-  - No visible cmd/PowerShell window
-  - Launches through `wscript.exe` + `.vbs` so PowerShell stays hidden
-  - Codex updates close running Codex processes before npm touches `codex.exe`; stale npm `.codex-*` temp directories are cleaned when possible
-  - Claude updates are skipped while `claude.exe` is running; orphaned `bin/claude.exe.old.<ts>` files (left by a half-applied swap, when claude.exe is missing) are renamed back to `claude.exe`, and stale `.old.*` files are deleted once `claude.exe` is healthy. If the orphan is gone but the bundled native-arch package (`@anthropic-ai/claude-code-win32-x64` / `-arm64`) is on disk, `bin/claude.exe` is restored by copying from the native binary instead.
-  - Claude bin recovery runs eagerly at the start of the embedded updater script (before consulting the per-machine package list), so it fires on every startup/logon/daily trigger even when the rename was caused by something other than this updater (e.g. the Claude desktop app's winget upgrade).
-  - Existing hidden auto-update tasks self-upgrade in place: when the GUI is opened, or when `install_all_windows.ps1` runs `install-all` / `install` / `setup-updater`, we detect a registered `InstallTheCli - Update AI CLIs` task and re-register it with the current embedded updater logic. This propagates fixes (like the bin-recovery improvements above) without making users manually re-run setup.
-- Linux script: cron updater
-  - `@reboot`
-  - daily (`0 3 * * *` default)
-- macOS GUI / Bash script: user LaunchAgent (`com.installthecli.ai-cli-updates`)
-  - `RunAtLoad`
-  - daily (`StartInterval` 86400)
-  - updates installed Homebrew formulae/casks, and npm packages only if globally installed
+## Auto-Update Behavior
+- Windows (GUI and PowerShell script): hidden Scheduled Task
+  `InstallTheCli - Update AI CLIs`.
+  - Triggers: startup, logon, daily (3:00AM default). No visible window — it
+    launches through `wscript.exe` + a `.vbs` wrapper so PowerShell stays hidden.
+  - Codex updates close running Codex processes before npm touches `codex.exe`;
+    stale npm `.codex-*` temp directories are cleaned when possible.
+  - Claude updates are skipped while `claude.exe` is running. Recovery ladder
+    when a half-applied swap broke the install: orphaned
+    `bin/claude.exe.old.<ts>` files are renamed back to `claude.exe`; if the
+    orphan is gone, OR `claude.exe` exists but is an implausibly tiny placeholder
+    (< 1 MiB), the exe is restored by copying from the bundled native-arch
+    package (`@anthropic-ai/claude-code-win32-x64` / `-arm64`). Stale `.old.*`
+    files (each ~250MB) are deleted once `claude.exe` is healthy.
+  - Claude bin recovery runs EAGERLY at the start of the embedded updater script
+    (before consulting the package list), so it fires on every trigger even when
+    the breakage came from something else (e.g. the Claude desktop app's winget upgrade).
+  - Registered tasks self-upgrade: opening the GUI, or running
+    `install-all` / `install` / `setup-updater` in `install_all_windows.ps1`,
+    re-registers an existing task with the current embedded updater logic, so
+    fixes propagate without users re-running setup.
+- Linux: cron (`@reboot` + daily `0 3 * * *` default), non-interactive.
+- macOS: user LaunchAgent `com.installthecli.ai-cli-updates` (`RunAtLoad` +
+  daily `StartInterval` 86400); updates installed brew formulae/casks, and npm
+  packages only if globally installed.
 
-## Hard Requirements / Invariants
+## Hard Invariants
+1. Keep installs quiet. npm keeps `--no-fund --no-audit --no-update-notifier
+   --loglevel error`; pip stays quiet/non-interactive where practical.
+2. When running `npm.cmd` by absolute path on Windows, prepend the npm directory
+   (usually `C:\Program Files\nodejs`) to subprocess `PATH` and set
+   `npm_config_update_notifier=false` — otherwise child processes fail with
+   `'"node"' is not recognized...`.
+3. Keep Ollama official (winget `Ollama.Ollama`, `https://ollama.com/install.sh`).
+4. Keep Mistral Vibe aligned with `https://docs.mistral.ai/mistral-vibe/introduction`:
+   Windows = Python 3.14 (installed if needed) + pip/uv; Linux = Python 3.12+ and
+   PEP 668 handled via `--break-system-packages`; macOS = formula `mistral-vibe`.
+5. macOS is Homebrew-first unless an official installer is the only confirmed
+   source. If Homebrew is missing, ASK before installing it. CLI casks:
+   `claude-code`, `codex`, `copilot-cli`, `antigravity`, `antigravity-ide`,
+   `visual-studio-code`. CLI formulae: `qwen-code`, `mistral-vibe`, `ollama`,
+   `ironclaw`. Desktop casks: `claude`, `chatgpt`, `google-gemini`. OpenClaw uses
+   `https://openclaw.ai/install.sh` (Node 22.14+). Grok installs Node via brew when needed.
+6. `install_all_linux.sh` and `install_all_macos.sh` must stay LF-only. CRLF
+   breaks Bash (`$'\r': command not found`). Normalize before testing if you edited on Windows.
+7. Preserve hidden/background updater behavior: no visible windows on Windows,
+   non-interactive cron/LaunchAgent on Linux/macOS.
+8. Do not remove fallback behaviors without replacement:
+   - Codex locked-file (`EBUSY`) retry and fallback-to-existing-install.
+   - The full Claude recovery ladder above (skip-while-running, `.old` restore,
+     tiny-placeholder detection, native-package copy).
+   - Windows Scheduled Task registration warning handling.
+   - Linux distro detection / package manager branching.
+   - Windows rtk Claude hook: `Install-RtkBashShim` drops an `rtk` shim into
+     Git's `usr\bin` so the bare `rtk hook claude` command resolves from Claude
+     Code's Git-Bash hook shell (minimal PATH, no cargo dir) AND is recognized by
+     rtk's hook-detector (avoids the "No hook installed" nag). If the shim can't
+     be written, fall back to the absolute POSIX path
+     `/c/Users/<leaf>/.cargo/bin/rtk.exe hook claude` (works, but nags). Mirrored
+     in `install_all_windows.ps1` (installer + embedded updater) and
+     `ai_cli_installer_gui.py` (`_install_rtk_bash_shim` /
+     `_normalize_claude_rtk_hook` + the embedded updater string) — keep them in
+     sync. Not needed on Linux/macOS.
+9. Keep logs explicit; users diagnose failures from the installer log output.
+10. Prefer small, targeted patches.
 
-1. Keep installs quiet.
-- npm commands should keep:
-  - `--no-fund`
-  - `--no-audit`
-  - `--no-update-notifier`
-  - `--loglevel error`
-- Pip commands should stay quiet/non-interactive where practical.
+## Testing (before shipping anything)
+- `py -3.14 -m unittest -q test_ai_cli_installer_gui.py` — the full suite must pass.
+- Coverage is designed for 100%:
+  `py -3.14 -m coverage run -m unittest -q test_ai_cli_installer_gui.py` then
+  `py -3.14 -m coverage report -m ai_cli_installer_gui.py test_ai_cli_installer_gui.py`.
+- Add tests for: new CLI specs, installer branching/fallbacks, updater changes,
+  and any change to the generated PowerShell/Bash script content.
+- Shell script changes: validate at least one dry-run path locally.
+  - Linux: `bash -n install_all_linux.sh`, `./install_all_linux.sh help`, `list`,
+    `install codex --dry-run --no-cron`.
+  - macOS: `bash -n install_all_macos.sh`, `./install_all_macos.sh help`, `list`,
+    `install codex --dry-run --no-launch-agent`.
 
-2. When running `npm.cmd` by absolute path on Windows, ensure child processes can still find `node`.
-- Prepend the npm directory (usually `C:\Program Files\nodejs`) to subprocess `PATH`.
-- Also set `npm_config_update_notifier=false` for subprocesses and background updater scripts.
-- This prevents failures like `'"node"' is not recognized...` during npm installs (seen with Gemini).
-
-3. Keep Ollama official.
-- Windows: `winget` package `Ollama.Ollama`
-- Linux: official installer script (`https://ollama.com/install.sh`)
-
-4. Keep Mistral Vibe aligned with docs.
-- Reference: `https://docs.mistral.ai/mistral-vibe/introduction`
-- Windows path uses Python `3.14` (install if needed) + `pip`/`uv`
-- Linux path supports Python `3.12+`, plus `pip`/`uv` (and handles PEP 668 via `--break-system-packages`)
-- macOS path uses the Homebrew formula `mistral-vibe`
-
-5. Keep macOS installs Homebrew-first unless an official installer is the only confirmed source.
-- The app must check for Homebrew. If missing, ask before installing it with the official Homebrew installer.
-- Known macOS CLI Homebrew casks: `claude-code`, `codex`, `copilot-cli`, `antigravity`, `visual-studio-code`
-- Known macOS CLI Homebrew formulae: `qwen-code`, `mistral-vibe`, `ollama`, `ironclaw`
-- Known macOS desktop casks: `claude`, `chatgpt`, `codex-app`, `google-gemini`
-- OpenClaw uses the official installer at `https://openclaw.ai/install.sh` and requires Node `22.14+` (or newer).
-- Grok currently uses npm package `@vibe-kit/grok-cli`; install Node through Homebrew when needed.
-
-6. `install_all_linux.sh` and `install_all_macos.sh` must remain LF-only line endings.
-- CRLF causes Bash errors (`$'\r': command not found`) when run on Linux.
-- If editing on Windows, normalize to LF before testing.
-
-7. Preserve hidden/background updater behavior.
-- No visible cmd/PowerShell windows for auto-updates on Windows.
-- Cron script should remain non-interactive on Linux.
-- LaunchAgent script should remain non-interactive on macOS.
-
-## Python / Build Version
-
-Use Python `3.14` on Windows for tests/builds in this repo.
-
-Preferred commands:
-- `py -3.14 -m unittest -q test_ai_cli_installer_gui.py`
-- `py -3.14 -m coverage run -m unittest -q test_ai_cli_installer_gui.py`
-- `py -3.14 -m coverage report -m ai_cli_installer_gui.py test_ai_cli_installer_gui.py`
-- `cmd /c build_exe.bat`
-
-`build_exe.bat` is expected to use `py -3.14 -m PyInstaller`.
-
-## Testing Expectations
-
-Before shipping behavior changes:
-- Run the full unit test file: `test_ai_cli_installer_gui.py`
-- Keep coverage at/near current level (currently designed for `100%`)
-- Add tests for:
-  - new CLI specs
-  - installer branching/fallbacks
-  - updater changes
-  - script content changes (PowerShell/Bash one-click scripts)
-
-If you change platform-specific behavior:
-- Validate at least one dry-run path locally.
-- For Linux script changes, prefer:
-  - `bash -n install_all_linux.sh`
-  - `./install_all_linux.sh help`
-  - `./install_all_linux.sh list`
-  - `./install_all_linux.sh install codex --dry-run --no-cron`
-- For macOS script changes, prefer:
-  - `bash -n install_all_macos.sh`
-  - `./install_all_macos.sh help`
-  - `./install_all_macos.sh list`
-  - `./install_all_macos.sh install codex --dry-run --no-launch-agent`
-
-## Build Quality
-
-Always fix any warnings, bugs, or errors that appear during a build before shipping. If the build produces warnings or errors that you can resolve, fix them immediately and rebuild to confirm they are gone.
-
-## Editing Guidance
-
-- Prefer small, targeted patches.
-- Keep logs explicit; users rely on the installer log output to diagnose failures.
-- Do not remove fallback behaviors without replacement:
-  - Codex locked-file (`EBUSY`) retry and fallback-to-existing-install
-  - Claude locked-file skip + `claude.exe.old.<ts>` recovery in the Windows updater
-  - Windows Scheduled Task registration warning handling
-  - Linux distro detection / package manager branching
-  - Windows rtk Claude hook: `Install-RtkBashShim` drops an `rtk` shim into Git's `usr\bin` so the bare `rtk hook claude` command resolves from Claude Code's Git-Bash hook shell (minimal PATH, no cargo dir) AND is recognized by rtk's hook-detector (avoids the "No hook installed" nag). If the shim can't be written, fall back to the absolute POSIX path `/c/Users/<leaf>/.cargo/bin/rtk.exe hook claude` (works, but nags). This logic is mirrored in `install_all_windows.ps1` (installer + embedded updater) and `ai_cli_installer_gui.py` (`_install_rtk_bash_shim` / `_normalize_claude_rtk_hook` + the embedded updater string) — keep them in sync. Not needed on Linux/macOS, where Claude Code uses a profile-PATH bash.
-
-## User-Facing Scripts (Command UX)
-
-`install_all_windows.ps1` should continue to support:
-- `install-all`
-- `install <target>`
-- `setup-updater`
-- `list`
-- `help`
-- `Get-Help .\install_all_windows.ps1 -Detailed`
-
-`install_all_linux.sh` should continue to support:
-- `install-all`
-- `install <target>`
-- `setup-cron`
-- `list`
-- `help`
-- convenience alias: `./install_all_linux.sh codex`
-
-`install_all_macos.sh` should continue to support:
-- `install-all`
-- `install <target>`
-- `setup-launch-agent`
-- `list`
-- `help`
-- convenience alias: `./install_all_macos.sh codex`
-- Homebrew prompt before installing Homebrew when missing
+## User-Facing Script Commands (do not drop any)
+- `install_all_windows.ps1`: `install-all`, `install <target>`, `setup-updater`,
+  `list`, `help`, and `Get-Help .\install_all_windows.ps1 -Detailed`.
+- `install_all_linux.sh`: `install-all`, `install <target>`, `setup-cron`,
+  `list`, `help`, and the convenience alias `./install_all_linux.sh codex`.
+- `install_all_macos.sh`: `install-all`, `install <target>`, `setup-launch-agent`,
+  `list`, `help`, the `codex` alias, and the Homebrew prompt before installing Homebrew.
 
 ## Packaging Notes
-
-`InstallTheCli.spec` is intentionally simple:
-- `datas=[]`
-- `hiddenimports=[]`
-
-Auto-update scripts are generated at runtime under user/system state locations, not bundled.
-
-GitHub release expectations:
-- Release from `master`; `master` is the expected default branch.
-- Publish real releases, not draft releases. Never leave GitHub releases in draft state unless the user explicitly reverses this project preference.
-- Use `build.bat release` for official releases; it publishes the release as Latest/non-draft and verifies the final state via `gh release view`. It does NOT delete other draft releases -- prior drafts must be cleaned up manually if you want them gone.
-- `build.bat release` only builds and attaches the **Windows** assets, then tags/pushes. The Linux and macOS artifacts are added afterward by the `linux-build.yml` / `macos-build.yml` GitHub Actions workflows, which trigger on the pushed tag and `gh release upload --clobber` their platform builds onto the release.
-  - Do NOT block waiting for those CI builds. Once `build.bat release` has run for a minute or so and is clearly progressing (EXE built, tag pushed, release created) and nothing in the build pipeline was changed, assume the macOS/Linux uploads will complete on their own. Don't poll CI to confirm.
-- A release can be cut from any machine: e.g. the maintainer may run the equivalent flow from Linux. If a target version's tag already exists remotely, `build.bat release` on another machine will refuse to re-tag -- bump to the next version rather than fighting the existing tag.
-- Release assets should include:
-  - `InstallTheCli-vX.Y.Z.exe`
-  - `InstallTheCli-vX.Y.Z.zip`
-  - `InstallTheCli-vX.Y.Z-SHA256SUMS.txt`
-  - `InstallTheCli-vX.Y.Z-linux.tar.gz` (added by Linux CI)
-  - `InstallTheCli-vX.Y.Z-macos.zip` (added by macOS CI)
-  - `install_all_windows.ps1`
-  - `install_all_macos.sh`
-  - `install_all_linux.sh`
+- `InstallTheCli.spec` is intentionally simple: `datas=[]`, `hiddenimports=[]`.
+- Auto-update scripts are generated at runtime under user/system state
+  locations, never bundled.
 
 ## If You Add A New CLI
-
 Update all of these together:
 - `CLI_SPECS` in `ai_cli_installer_gui.py`
 - install logic (if not plain npm)
 - desktop shortcut resolution rules if needed
-- auto-update (Windows + Linux one-click updater scripts, if applicable)
-- auto-update (macOS LaunchAgent script, if applicable)
+- auto-update: Windows embedded updater, Linux cron script, macOS LaunchAgent
+  script (whichever apply)
 - one-click scripts (`install_all_windows.ps1`, `install_all_macos.sh`, `install_all_linux.sh`)
 - tests in `test_ai_cli_installer_gui.py`
 - `README.md`
