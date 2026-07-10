@@ -1109,7 +1109,7 @@ function Install-NpmCliTarget {
             }
         }
         Write-Log "Trying npm package for $($spec.Label): $pkg"
-        $code = Invoke-ExternalCommand -Args (@($NpmPath) + $NpmFlags + @('install', '-g', $pkg))
+        $code = Invoke-ExternalCommand -Args (@($NpmPath) + $NpmFlags + @('install', '-g', '--include=optional', $pkg))
         $claudeHealthy = $false
         if ($isClaudePackage) {
             $claudeHealthy = Repair-ClaudeAfterFailedUpdate -NpmPath $NpmPath
@@ -1549,6 +1549,32 @@ function Repair-ClaudeAfterFailedUpdate {
   } catch { }
 }
 
+function Test-NpmCliInstallHealth([string]$Package) {
+  try {
+    $prefix = Get-NpmPrefix
+    if (-not $prefix) { return $false }
+    if ($Package -eq '@anthropic-ai/claude-code') {
+      $claudeExe = Join-Path $prefix 'node_modules\@anthropic-ai\claude-code\bin\claude.exe'
+      return ((Test-Path -LiteralPath (Join-Path $prefix 'claude.cmd') -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $prefix 'claude.ps1') -PathType Leaf) -and
+        (Test-Path -LiteralPath $claudeExe -PathType Leaf) -and
+        ((Get-Item -LiteralPath $claudeExe).Length -ge 1048576))
+    }
+    if ($Package -eq '@openai/codex') {
+      $pkgDir = Join-Path $prefix 'node_modules\@openai\codex'
+      $nativeRoot = Join-Path $pkgDir 'node_modules\@openai'
+      $nativeExe = Get-ChildItem -LiteralPath $nativeRoot -Filter 'codex.exe' -File -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -match '\\vendor\\[^\\]+\\bin\\codex\.exe$' -and $_.Length -ge 1048576 } |
+        Select-Object -First 1
+      return ((Test-Path -LiteralPath (Join-Path $prefix 'codex.cmd') -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $prefix 'codex.ps1') -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $pkgDir 'bin\codex.js') -PathType Leaf) -and
+        ($null -ne $nativeExe))
+    }
+    return $true
+  } catch { return $false }
+}
+
 # Run Claude bin recovery upfront, before any npm work. The orphan can be
 # left by ANY update path that touches @anthropic-ai/claude-code (the Claude
 # desktop app's winget upgrade, a self-update from inside `claude`, a
@@ -1573,9 +1599,20 @@ function Update-NpmCli([string[]]$Candidates) {
     if ($pkg -eq '@anthropic-ai/claude-code') {
       if (Test-ClaudeCliRunning) { return }
     }
-    & $npmPath @NpmFlags i -g ("$pkg@latest") *>&1 | Out-Null
+    & $npmPath @NpmFlags i -g --include=optional ("$pkg@latest") *>&1 | Out-Null
+    $installExit = $LASTEXITCODE
     if ($pkg -eq '@openai/codex') { Remove-CodexNpmTempDirs }
     if ($pkg -eq '@anthropic-ai/claude-code') { Repair-ClaudeAfterFailedUpdate }
+    if ($pkg -in @('@anthropic-ai/claude-code', '@openai/codex') -and
+        ($installExit -ne 0 -or -not (Test-NpmCliInstallHealth $pkg))) {
+      if ($pkg -eq '@openai/codex') { Remove-CodexNpmTempDirs }
+      & $npmPath @NpmFlags i -g --include=optional --force ("$pkg@latest") *>&1 | Out-Null
+      if ($pkg -eq '@anthropic-ai/claude-code') { Repair-ClaudeAfterFailedUpdate }
+      if ($pkg -eq '@openai/codex') { Remove-CodexNpmTempDirs }
+      if ($LASTEXITCODE -ne 0 -or -not (Test-NpmCliInstallHealth $pkg)) {
+        throw "$pkg remains unusable after a forced reinstall"
+      }
+    }
     return
   }
 }

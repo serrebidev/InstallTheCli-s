@@ -618,10 +618,13 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("copilot/openclaw/ironclaw/mistral", script)
         self.assertIn("setup-updater", script)
         self.assertIn("--no-update-notifier", script)
+        self.assertIn("--include=optional", script)
+        self.assertIn("function Test-NpmCliInstallHealth", script)
+        self.assertIn("remains unusable after a forced reinstall", script)
         self.assertIn("2>&1 | ForEach-Object { Write-Host $_ }", script)
         self.assertIn("if (-not $DryRun)", script)
         self.assertIn("Get-NpmPath", script)
-        self.assertIn('i -g ("$pkg@latest")', script)
+        self.assertIn('i -g --include=optional ("$pkg@latest")', script)
         self.assertIn("Test-CodexCliRunning", script)
         self.assertIn("Stop-CodexCliForUpdate", script)
         self.assertIn("closing process(es) before update", script)
@@ -1539,6 +1542,7 @@ class CommandAndDetectionTests(unittest.TestCase):
                 "error",
                 "install",
                 "-g",
+                "--include=optional",
                 "@openai/codex",
             ],
         )
@@ -2301,8 +2305,10 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
         self.assertIn("'--loglevel' 'error'", script)
         self.assertIn("foreach ($pkg in $packages)", script)
         self.assertIn("$null = & $npm", script)
-        self.assertIn("'i' '-g'", script)
+        self.assertIn("'i' '-g' '--include=optional'", script)
         self.assertIn('"$pkg@latest"', script)
+        self.assertIn("function Test-NpmCliInstallHealth", script)
+        self.assertIn("remains unusable after a forced reinstall", script)
         self.assertIn("function Get-NpmPath", script)
         self.assertIn("nodejs\\npm.cmd", script)
         # Codex updates close active Codex processes before npm touches

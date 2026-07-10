@@ -136,6 +136,10 @@ set) and go through `ensure_app_cli` / `uninstall_app_cli`:
   - Claude bin recovery runs EAGERLY at the start of the embedded updater script
     (before consulting the package list), so it fires on every trigger even when
     the breakage came from something else (e.g. the Claude desktop app's winget upgrade).
+  - After each Claude/Codex npm update, the updater verifies both PowerShell
+    shims and the native executable. It forces optional native dependencies,
+    retries one forced reinstall on failure, and exits non-zero if the CLI is
+    still unusable so Task Scheduler cannot report a false success.
   - Registered tasks self-upgrade: opening the GUI, or running
     `install-all` / `install` / `setup-updater` in `install_all_windows.ps1`,
     re-registers an existing task with the current embedded updater logic, so
