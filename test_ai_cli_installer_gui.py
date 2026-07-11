@@ -5,7 +5,7 @@ import tempfile
 import types
 import unittest
 from typing import Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import ai_cli_installer_gui as m
 
@@ -630,26 +630,27 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("closing process(es) before update", script)
         self.assertIn("Remove-CodexNpmTempDirs", script)
         self.assertIn(".codex-*", script)
-        # Claude updates need the same protection: skip while running, restore
-        # bin/claude.exe from the .old.<ts> orphan if a prior swap failed.
+        # Claude installs/updates via Anthropic's official native installer,
+        # not npm: skip while running, update in place with `claude update`,
+        # reinstall via install.ps1 when broken, and migrate the legacy npm
+        # package out of the way (its shims shadow the native exe on PATH).
         self.assertIn("Test-ClaudeCliRunning", script)
-        self.assertIn("Repair-ClaudeAfterFailedUpdate", script)
-        self.assertIn("Repair-ClaudeAfterFailedUpdate -NpmPath $NpmPath", script)
-        self.assertIn("Claude npm install returned success, but claude.exe could not be found.", script)
-        self.assertIn("existing claude.exe was restored", script)
-        self.assertIn("claude.exe.old.*", script)
-        self.assertIn("@anthropic-ai\\claude-code", script)
-        # Native-arch fallback covers the case where the .old orphan is gone
-        # but the optional native package is still on disk (e.g. winget
-        # upgrade of the Claude desktop app left this state behind).
-        self.assertIn("$current.Length -lt 1048576", script)
-        self.assertIn("claude-code-win32-x64", script)
-        self.assertIn("claude-code-win32-arm64", script)
-        # Embedded updater calls the repair eagerly at script start so that
-        # every startup/logon/daily trigger self-heals, not just runs that
-        # touch claude via npm.
+        self.assertIn("https://claude.ai/install.ps1", script)
+        self.assertIn("function Install-ClaudeNativeCli", script)
+        self.assertIn("function Remove-LegacyClaudeNpmInstall", script)
+        self.assertIn("function Install-ClaudeNative", script)
+        self.assertIn("function Update-ClaudeNative", script)
+        self.assertIn(".local\\bin\\claude.exe", script)
+        self.assertIn("& $claudeExe update", script)
+        self.assertIn("uninstall -g '@anthropic-ai/claude-code'", script)
+        self.assertNotIn("Repair-ClaudeAfterFailedUpdate", script)
+        self.assertNotIn("claude.exe.old.*", script)
+        self.assertNotIn("claude-code-win32-x64", script)
+        # Embedded updater updates Claude eagerly at script start so that
+        # every startup/logon/daily trigger keeps the native install fresh
+        # even though Claude is no longer in the npm package list.
         self.assertIn(
-            "# Run Claude bin recovery upfront, before any npm work.",
+            "# Update Claude upfront, before any npm work.",
             script,
         )
         # Auto-upgrade existing scheduled tasks: when the user runs install-all
@@ -1557,109 +1558,56 @@ class CommandAndDetectionTests(unittest.TestCase):
         env = run_mock.call_args.kwargs["env"]
         self.assertTrue(env["PATH"].startswith(r"C:\Program Files\nodejs;"))
 
-    def test_repair_claude_after_failed_update_restores_latest_orphan(self) -> None:
+    def test_remove_legacy_claude_npm_install_returns_false_without_npm(self) -> None:
+        with patch.object(m, "find_npm", return_value=None):
+            self.assertFalse(m.remove_legacy_claude_npm_install(lambda _msg: None))
+
+    def test_remove_legacy_claude_npm_install_returns_false_without_prefix(self) -> None:
+        with (
+            patch.object(m, "find_npm", return_value="npm.cmd"),
+            patch.object(m, "get_npm_global_prefix", return_value=None),
+        ):
+            self.assertFalse(m.remove_legacy_claude_npm_install(lambda _msg: None))
+
+    def test_remove_legacy_claude_npm_install_returns_false_without_legacy_package(self) -> None:
+        with tempfile.TemporaryDirectory() as prefix:
+            with (
+                patch.object(m, "find_npm", return_value="npm.cmd"),
+                patch.object(m, "get_npm_global_prefix", return_value=prefix),
+                patch.object(m, "npm_uninstall_global") as uninstall_mock,
+            ):
+                self.assertFalse(m.remove_legacy_claude_npm_install(lambda _msg: None))
+            uninstall_mock.assert_not_called()
+
+    def test_remove_legacy_claude_npm_install_uninstalls_legacy_package(self) -> None:
         logs: list[str] = []
         with tempfile.TemporaryDirectory() as prefix:
-            bin_dir = os.path.join(prefix, "node_modules", "@anthropic-ai", "claude-code", "bin")
-            os.makedirs(bin_dir)
-            old = os.path.join(bin_dir, "claude.exe.old.100")
-            latest = os.path.join(bin_dir, "claude.exe.old.200")
-            with open(old, "w", encoding="utf-8") as f:
-                f.write("old")
-            with open(latest, "w", encoding="utf-8") as f:
-                f.write("latest")
-
+            legacy_dir = os.path.join(prefix, "node_modules", "@anthropic-ai", "claude-code")
+            os.makedirs(legacy_dir)
             with (
-                patch.object(m, "is_windows", return_value=True),
+                patch.object(m, "find_npm", return_value="npm.cmd"),
                 patch.object(m, "get_npm_global_prefix", return_value=prefix),
+                patch.object(m, "npm_uninstall_global", return_value=0) as uninstall_mock,
             ):
-                healthy = m.repair_claude_after_failed_update("npm.cmd", logs.append)
+                self.assertTrue(m.remove_legacy_claude_npm_install(logs.append))
+            uninstall_mock.assert_called_once()
+            self.assertEqual(uninstall_mock.call_args.args[1], m.CLAUDE_LEGACY_NPM_PACKAGE)
+        self.assertTrue(any("Removing legacy Claude CLI npm install" in line for line in logs))
 
-            claude_exe = os.path.join(bin_dir, "claude.exe")
-            self.assertTrue(healthy)
-            with open(claude_exe, "r", encoding="utf-8") as f:
-                self.assertEqual(f.read(), "latest")
-            self.assertFalse(os.path.exists(old))
-            self.assertTrue(any("Restored Claude CLI executable" in line for line in logs))
-
-    def test_repair_claude_after_failed_update_cleans_stale_orphans(self) -> None:
-        with tempfile.TemporaryDirectory() as prefix:
-            bin_dir = os.path.join(prefix, "node_modules", "@anthropic-ai", "claude-code", "bin")
-            os.makedirs(bin_dir)
-            claude_exe = os.path.join(bin_dir, "claude.exe")
-            orphan = os.path.join(bin_dir, "claude.exe.old.100")
-            with open(claude_exe, "w", encoding="utf-8") as f:
-                f.write("current")
-            with open(orphan, "w", encoding="utf-8") as f:
-                f.write("old")
-
-            with (
-                patch.object(m, "is_windows", return_value=True),
-                patch.object(m, "get_npm_global_prefix", return_value=prefix),
-            ):
-                healthy = m.repair_claude_after_failed_update("npm.cmd", lambda _msg: None)
-
-            self.assertTrue(healthy)
-            self.assertTrue(os.path.isfile(claude_exe))
-            self.assertFalse(os.path.exists(orphan))
-
-    def test_repair_claude_after_failed_update_falls_back_to_native_binary(self) -> None:
-        # When claude.exe is missing AND no .old.<ts> orphan is present, copy
-        # from the bundled @anthropic-ai/claude-code-win32-x64 native package.
-        # This covers the case where a previous repair ran and consumed the
-        # orphan, but the bin entrypoint went missing again afterwards.
+    def test_remove_legacy_claude_npm_install_detects_lib_prefix_and_warns_on_failure(self) -> None:
+        # Linux/macOS global npm installs live under <prefix>/lib/node_modules.
+        # A failed uninstall still reports True (legacy install found) but warns.
         logs: list[str] = []
         with tempfile.TemporaryDirectory() as prefix:
-            pkg_dir = os.path.join(prefix, "node_modules", "@anthropic-ai", "claude-code")
-            bin_dir = os.path.join(pkg_dir, "bin")
-            native_dir = os.path.join(
-                pkg_dir, "node_modules", "@anthropic-ai", "claude-code-win32-x64"
-            )
-            os.makedirs(bin_dir)
-            os.makedirs(native_dir)
-            native_exe = os.path.join(native_dir, "claude.exe")
-            with open(native_exe, "w", encoding="utf-8") as f:
-                f.write("native-binary")
-
+            legacy_dir = os.path.join(prefix, "lib", "node_modules", "@anthropic-ai", "claude-code")
+            os.makedirs(legacy_dir)
             with (
-                patch.object(m, "is_windows", return_value=True),
+                patch.object(m, "find_npm", return_value="npm"),
                 patch.object(m, "get_npm_global_prefix", return_value=prefix),
+                patch.object(m, "npm_uninstall_global", return_value=1),
             ):
-                healthy = m.repair_claude_after_failed_update("npm.cmd", logs.append)
-
-            claude_exe = os.path.join(bin_dir, "claude.exe")
-            self.assertTrue(healthy)
-            with open(claude_exe, "r", encoding="utf-8") as f:
-                self.assertEqual(f.read(), "native-binary")
-            self.assertTrue(any("copying from native package" in line for line in logs))
-
-    def test_repair_claude_after_failed_update_replaces_tiny_broken_exe(self) -> None:
-        logs: list[str] = []
-        with tempfile.TemporaryDirectory() as prefix:
-            pkg_dir = os.path.join(prefix, "node_modules", "@anthropic-ai", "claude-code")
-            bin_dir = os.path.join(pkg_dir, "bin")
-            native_dir = os.path.join(
-                pkg_dir, "node_modules", "@anthropic-ai", "claude-code-win32-x64"
-            )
-            os.makedirs(bin_dir)
-            os.makedirs(native_dir)
-            claude_exe = os.path.join(bin_dir, "claude.exe")
-            native_exe = os.path.join(native_dir, "claude.exe")
-            with open(claude_exe, "w", encoding="utf-8") as f:
-                f.write("tiny")
-            with open(native_exe, "w", encoding="utf-8") as f:
-                f.write("native-binary")
-
-            with (
-                patch.object(m, "is_windows", return_value=True),
-                patch.object(m, "get_npm_global_prefix", return_value=prefix),
-            ):
-                healthy = m.repair_claude_after_failed_update("npm.cmd", logs.append)
-
-            self.assertTrue(healthy)
-            with open(claude_exe, "r", encoding="utf-8") as f:
-                self.assertEqual(f.read(), "native-binary")
-            self.assertTrue(any("unexpectedly small" in line for line in logs))
+                self.assertTrue(m.remove_legacy_claude_npm_install(logs.append))
+        self.assertTrue(any("legacy Claude npm uninstall exited" in line for line in logs))
 
     def test_refresh_existing_cli_auto_update_task_skips_when_no_task_or_state(self) -> None:
         logs: list[str] = []
@@ -1735,45 +1683,6 @@ class CommandAndDetectionTests(unittest.TestCase):
             patch.object(m, "is_macos", return_value=False),
         ):
             self.assertFalse(m.refresh_existing_cli_auto_update_task(lambda _msg: None))
-
-    def test_repair_claude_after_failed_update_native_fallback_runs_when_orphan_restore_fails(self) -> None:
-        # Even if the .old orphan exists but cannot be moved (e.g. concurrent
-        # access / locked), the native package fallback should kick in so we
-        # still end up with a working bin/claude.exe.
-        logs: list[str] = []
-        with tempfile.TemporaryDirectory() as prefix:
-            pkg_dir = os.path.join(prefix, "node_modules", "@anthropic-ai", "claude-code")
-            bin_dir = os.path.join(pkg_dir, "bin")
-            native_dir = os.path.join(
-                pkg_dir, "node_modules", "@anthropic-ai", "claude-code-win32-x64"
-            )
-            os.makedirs(bin_dir)
-            os.makedirs(native_dir)
-            orphan = os.path.join(bin_dir, "claude.exe.old.100")
-            native_exe = os.path.join(native_dir, "claude.exe")
-            with open(orphan, "w", encoding="utf-8") as f:
-                f.write("old")
-            with open(native_exe, "w", encoding="utf-8") as f:
-                f.write("native-binary")
-
-            real_replace = m.os.replace
-
-            def replace_failing_for_orphan(src: str, dst: str) -> None:
-                if src == orphan:
-                    raise OSError("simulated lock")
-                real_replace(src, dst)
-
-            with (
-                patch.object(m, "is_windows", return_value=True),
-                patch.object(m, "get_npm_global_prefix", return_value=prefix),
-                patch.object(m.os, "replace", side_effect=replace_failing_for_orphan),
-            ):
-                healthy = m.repair_claude_after_failed_update("npm.cmd", logs.append)
-
-            claude_exe = os.path.join(bin_dir, "claude.exe")
-            self.assertTrue(healthy)
-            with open(claude_exe, "r", encoding="utf-8") as f:
-                self.assertEqual(f.read(), "native-binary")
 
     def test_remove_codex_npm_temp_dirs_removes_only_safe_temp_dirs(self) -> None:
         logs: list[str] = []
@@ -1872,28 +1781,15 @@ class CommandAndDetectionTests(unittest.TestCase):
 
     def test_try_install_package_candidates_returns_last_error(self) -> None:
         logs: list[str] = []
-        claude = next(spec for spec in m.CLI_SPECS if spec.key == "claude")
+        codex = next(spec for spec in m.CLI_SPECS if spec.key == "codex")
         with (
+            patch.object(m, "is_windows", return_value=False),
             patch.object(m, "npm_install_global", return_value=9),
-            patch.object(m, "repair_claude_after_failed_update", return_value=False),
         ):
-            success, err = m.try_install_package_candidates("npm.cmd", claude, logs.append)
+            success, err = m.try_install_package_candidates("npm.cmd", codex, logs.append)
         self.assertFalse(success)
-        self.assertEqual(err, "@anthropic-ai/claude-code failed with exit code 9")
+        self.assertEqual(err, "@openai/codex failed with exit code 9")
         self.assertIn(err, logs)
-
-    def test_try_install_package_candidates_recovers_claude_after_failed_install(self) -> None:
-        logs: list[str] = []
-        claude = next(spec for spec in m.CLI_SPECS if spec.key == "claude")
-        with (
-            patch.object(m, "npm_install_global", return_value=9),
-            patch.object(m, "repair_claude_after_failed_update", side_effect=[False, True]) as repair_mock,
-        ):
-            success, pkg = m.try_install_package_candidates("npm.cmd", claude, logs.append)
-        self.assertTrue(success)
-        self.assertEqual(pkg, "@anthropic-ai/claude-code")
-        self.assertEqual(repair_mock.call_count, 2)
-        self.assertTrue(any("existing claude.exe was restored" in line for line in logs))
 
     def test_try_install_package_candidates_closes_codex_before_install(self) -> None:
         logs: list[str] = []
@@ -1929,18 +1825,113 @@ class CommandAndDetectionTests(unittest.TestCase):
         npm_mock.assert_not_called()
         self.assertIn(str(err), logs)
 
-    def test_try_install_package_candidates_rejects_successful_claude_install_without_exe(self) -> None:
+    def test_claude_spec_is_app_installer_with_local_bin_dirs(self) -> None:
+        # Claude installs via Anthropic's native installer, not npm, so it must
+        # route through ensure_app_cli/uninstall_app_cli and resolve from
+        # ~/.local/bin.
+        claude = next(spec for spec in m.CLI_SPECS if spec.key == "claude")
+        self.assertTrue(m.cli_is_app_installer(claude))
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m.os.path, "isdir", return_value=True),
+        ):
+            dirs = m.get_app_cli_bin_dirs(claude, lambda _msg: None)
+        self.assertTrue(any(os.path.join(".local", "bin") in d for d in dirs))
+
+    def test_ensure_app_cli_installs_claude_native_on_windows(self) -> None:
         logs: list[str] = []
         claude = next(spec for spec in m.CLI_SPECS if spec.key == "claude")
         with (
-            patch.object(m, "npm_install_global", return_value=0),
-            patch.object(m, "repair_claude_after_failed_update", return_value=False),
             patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "is_macos", return_value=False),
+            patch.object(m, "remove_legacy_claude_npm_install", return_value=False) as legacy_mock,
+            patch.object(m, "run_command", return_value=0) as run_mock,
         ):
-            success, err = m.try_install_package_candidates("npm.cmd", claude, logs.append)
+            success, pkg = m.ensure_app_cli(claude, logs.append)
+        self.assertTrue(success)
+        self.assertEqual(pkg, "claude-code")
+        legacy_mock.assert_called_once()
+        args = run_mock.call_args.args[0]
+        self.assertEqual(args[0], "powershell")
+        self.assertIn(m.CLAUDE_INSTALL_PS1, args[-1])
+
+    def test_ensure_app_cli_installs_claude_native_on_linux_and_reports_failure(self) -> None:
+        logs: list[str] = []
+        claude = next(spec for spec in m.CLI_SPECS if spec.key == "claude")
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=False),
+            patch.object(m, "remove_legacy_claude_npm_install", return_value=False),
+            patch.object(m, "run_command", return_value=0) as run_mock,
+        ):
+            success, pkg = m.ensure_app_cli(claude, logs.append)
+        self.assertTrue(success)
+        self.assertEqual(pkg, "claude-code")
+        self.assertIn(m.CLAUDE_INSTALL_SH, run_mock.call_args.args[0][-1])
+
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=False),
+            patch.object(m, "remove_legacy_claude_npm_install", return_value=False),
+            patch.object(m, "run_command", return_value=7),
+        ):
+            success, err = m.ensure_app_cli(claude, logs.append)
         self.assertFalse(success)
-        self.assertEqual(err, "@anthropic-ai/claude-code installed, but claude.exe was not found")
-        self.assertIn(err, logs)
+        self.assertIn("Claude native installer failed with exit code 7", str(err))
+
+    def test_ensure_app_cli_installs_claude_via_brew_cask_on_macos(self) -> None:
+        claude = next(spec for spec in m.CLI_SPECS if spec.key == "claude")
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_linux", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "brew_install_or_upgrade", return_value=(True, "claude-code")) as brew_mock,
+        ):
+            success, pkg = m.ensure_app_cli(claude, lambda _msg: None)
+        self.assertTrue(success)
+        self.assertEqual(pkg, "claude-code")
+        brew_mock.assert_called_once_with("claude-code", ANY, cask=True)
+
+    def test_uninstall_app_cli_removes_claude_native_install(self) -> None:
+        claude = next(spec for spec in m.CLI_SPECS if spec.key == "claude")
+        with tempfile.TemporaryDirectory() as home:
+            bin_dir = os.path.join(home, ".local", "bin")
+            share_dir = os.path.join(home, ".local", "share", "claude")
+            os.makedirs(bin_dir)
+            os.makedirs(share_dir)
+            claude_bin = os.path.join(bin_dir, "claude")
+            with open(claude_bin, "w", encoding="utf-8") as f:
+                f.write("native")
+            with (
+                patch.object(m, "is_windows", return_value=False),
+                patch.object(m, "is_macos", return_value=False),
+                patch.object(m, "remove_legacy_claude_npm_install", return_value=False),
+                patch.object(m.os.path, "expanduser", return_value=home),
+            ):
+                success, pkg = m.uninstall_app_cli(claude, lambda _msg: None)
+            self.assertTrue(success)
+            self.assertEqual(pkg, "claude-code")
+            self.assertFalse(os.path.exists(claude_bin))
+            self.assertFalse(os.path.exists(share_dir))
+
+    def test_uninstall_app_cli_removes_claude_exe_on_windows(self) -> None:
+        claude = next(spec for spec in m.CLI_SPECS if spec.key == "claude")
+        with tempfile.TemporaryDirectory() as home:
+            bin_dir = os.path.join(home, ".local", "bin")
+            os.makedirs(bin_dir)
+            claude_exe = os.path.join(bin_dir, "claude.exe")
+            with open(claude_exe, "w", encoding="utf-8") as f:
+                f.write("native")
+            with (
+                patch.object(m, "is_windows", return_value=True),
+                patch.object(m, "is_macos", return_value=False),
+                patch.object(m, "remove_legacy_claude_npm_install", return_value=False),
+                patch.object(m.os.path, "expanduser", return_value=home),
+            ):
+                success, pkg = m.uninstall_app_cli(claude, lambda _msg: None)
+            self.assertTrue(success)
+            self.assertEqual(pkg, "claude-code")
+            self.assertFalse(os.path.exists(claude_exe))
 
     def test_try_install_openclaw_official_macos_checks_brew_node_and_no_onboard(self) -> None:
         spec = next(spec for spec in m.CLI_SPECS if spec.key == "openclaw")
@@ -2322,26 +2313,28 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
         self.assertIn(".codex-*", script)
         self.assertIn("Stop-CodexCliForUpdate", script)
         self.assertIn("if (Test-CodexCliRunning) { continue }", script)
-        # Same pattern for claude: skip while running, plus recover bin/claude.exe
-        # from a stranded claude.exe.old.<ts> if a prior swap failed half-way.
+        # Claude updates via Anthropic's native installer: skip while running,
+        # `claude update` in place, reinstall via install.ps1 when broken, and
+        # migrate the legacy npm install out of the way.
         self.assertIn("function Test-ClaudeCliRunning", script)
-        self.assertIn("function Repair-ClaudeAfterFailedUpdate", script)
-        self.assertIn("$pkg -eq '@anthropic-ai/claude-code'", script)
-        self.assertIn("claude.exe.old.*", script)
-        self.assertIn("node_modules\\@anthropic-ai\\claude-code'", script)
-        self.assertIn("if (Test-ClaudeCliRunning) { continue }", script)
-        # Native-arch fallback: when bin/claude.exe is missing AND no .old
-        # orphan can be restored, copy from the bundled platform package.
-        # This handles cleanup-leftover or partial-postinstall states where
-        # the orphan-based recovery alone is not enough.
-        self.assertIn("$current.Length -lt 1048576", script)
-        self.assertIn("claude-code-win32-x64", script)
-        self.assertIn("claude-code-win32-arm64", script)
-        # Eager invocation: the recovery must run BEFORE the package list is
-        # consulted, so any auto-update trigger (startup/logon/daily) self-heals
-        # even when the user's $packages file does not include Claude. The
-        # call must be a bare statement, not part of the foreach loop.
-        eager_marker = "Repair-ClaudeAfterFailedUpdate\n$packagesFile ="
+        self.assertIn("function Install-ClaudeNative", script)
+        self.assertIn("function Update-ClaudeNative", script)
+        self.assertIn("if (Test-ClaudeCliRunning) { return }", script)
+        self.assertIn(".local\\bin\\claude.exe", script)
+        self.assertIn("& $claudeExe update", script)
+        self.assertIn("https://claude.ai/install.ps1", script)
+        self.assertIn("'uninstall' '-g' '@anthropic-ai/claude-code'", script)
+        self.assertNotIn("Repair-ClaudeAfterFailedUpdate", script)
+        self.assertNotIn("claude.exe.old.*", script)
+        self.assertNotIn("claude-code-win32-x64", script)
+        # Legacy packages files may still list the old Claude npm package;
+        # the loop must skip it instead of feeding it back to npm.
+        self.assertIn("if ($pkg -eq '@anthropic-ai/claude-code') { continue }", script)
+        # Eager invocation: the Claude update must run BEFORE the package list
+        # is consulted, so any auto-update trigger (startup/logon/daily) keeps
+        # the native install fresh even though Claude never appears in new
+        # packages files. The call must be a bare statement, not in the loop.
+        eager_marker = "Update-ClaudeNative\n$packagesFile ="
         self.assertIn(eager_marker, script)
         # The Gemini CLI package/updater was removed; only stale profile cleanup may mention it.
         self.assertNotIn("@google/gemini-cli", script.lower())

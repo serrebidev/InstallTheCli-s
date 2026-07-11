@@ -79,7 +79,11 @@ You should not need to open `build.bat` to cut a release — everything operatio
 ## What It Installs (Do Not Break Quietly)
 
 CLI specs (`CLI_SPECS` in `ai_cli_installer_gui.py`):
-- Claude CLI (`@anthropic-ai/claude-code`, npm; macOS cask `claude-code`)
+- Claude CLI (Anthropic's official NATIVE installer — Windows
+  `https://claude.ai/install.ps1`, Linux `https://claude.ai/install.sh`,
+  binary at `~/.local/bin/claude(.exe)`; macOS cask `claude-code`. NOT npm:
+  the legacy `@anthropic-ai/claude-code` npm install is migrated out of the
+  way by installers and updaters because its shims shadow the native exe)
 - Codex CLI (`@openai/codex`, npm; macOS cask `codex`)
 - Antigravity 2.0 (Google's agentic IDE + `antigravity` CLI; winget / brew cask / Linux tarball)
 - Antigravity CLI (standalone `agy`; Google's official self-updating installer, all platforms)
@@ -126,18 +130,16 @@ set) and go through `ensure_app_cli` / `uninstall_app_cli`:
     launches through `wscript.exe` + a `.vbs` wrapper so PowerShell stays hidden.
   - Codex updates close running Codex processes before npm touches `codex.exe`;
     stale npm `.codex-*` temp directories are cleaned when possible.
-  - Claude updates are skipped while `claude.exe` is running. Recovery ladder
-    when a half-applied swap broke the install: orphaned
-    `bin/claude.exe.old.<ts>` files are renamed back to `claude.exe`; if the
-    orphan is gone, OR `claude.exe` exists but is an implausibly tiny placeholder
-    (< 1 MiB), the exe is restored by copying from the bundled native-arch
-    package (`@anthropic-ai/claude-code-win32-x64` / `-arm64`). Stale `.old.*`
-    files (each ~250MB) are deleted once `claude.exe` is healthy.
-  - Claude bin recovery runs EAGERLY at the start of the embedded updater script
-    (before consulting the package list), so it fires on every trigger even when
-    the breakage came from something else (e.g. the Claude desktop app's winget upgrade).
-  - After each Claude/Codex npm update, the updater verifies both PowerShell
-    shims and the native executable. It forces optional native dependencies,
+  - Claude updates are skipped while `claude.exe` is running. `Update-ClaudeNative`
+    runs `%USERPROFILE%\.local\bin\claude.exe update`; if the exe is missing or
+    the update fails, it reinstalls via `https://claude.ai/install.ps1`. Any
+    legacy `@anthropic-ai/claude-code` npm install is uninstalled first
+    (migration), and legacy packages-file entries for it are skipped/filtered.
+  - Claude's native update runs EAGERLY at the start of the embedded updater
+    script (before consulting the npm package list), because Claude is no
+    longer an npm package and never appears in new packages files.
+  - After each Codex npm update, the updater verifies both PowerShell shims
+    and the native executable. It forces optional native dependencies,
     retries one forced reinstall on failure, and exits non-zero if the CLI is
     still unusable so Task Scheduler cannot report a false success.
   - Registered tasks self-upgrade: opening the GUI, or running
@@ -172,8 +174,8 @@ set) and go through `ensure_app_cli` / `uninstall_app_cli`:
    non-interactive cron/LaunchAgent on Linux/macOS.
 8. Do not remove fallback behaviors without replacement:
    - Codex locked-file (`EBUSY`) retry and fallback-to-existing-install.
-   - The full Claude recovery ladder above (skip-while-running, `.old` restore,
-     tiny-placeholder detection, native-package copy).
+   - The Claude native self-heal above (skip-while-running, `claude update`,
+     reinstall via install.ps1/install.sh on breakage, legacy npm migration).
    - Windows Scheduled Task registration warning handling.
    - Linux distro detection / package manager branching.
    - Windows rtk Claude hook: `Install-RtkBashShim` drops an `rtk` shim into

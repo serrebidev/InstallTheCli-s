@@ -5,7 +5,8 @@ One-click Windows installer for AI CLIs used by InstallTheCli.
 .DESCRIPTION
 Installs all supported AI CLIs (or one selected target) using official package sources:
 - winget for Node.js, Python 3.14, Ollama, Antigravity, and Visual Studio Code
-- npm for Claude/Codex/Grok/Qwen/Copilot
+- Anthropic's official native installer (claude.ai/install.ps1) for Claude
+- npm for Codex/Grok/Qwen/Copilot
 - uv/pip for Mistral Vibe
 
 Also configures a hidden Scheduled Task (startup, logon, daily) unless disabled.
@@ -64,6 +65,8 @@ $PythonWingetId = 'Python.Python.3.14'
 $OllamaWingetId = 'Ollama.Ollama'
 $AntigravityWingetId = 'Google.Antigravity'
 $AntigravityCliInstallPs1 = 'https://antigravity.google/cli/install.ps1'
+$ClaudeInstallPs1 = 'https://claude.ai/install.ps1'
+$ClaudeLegacyNpmPackage = '@anthropic-ai/claude-code'
 $AntigravityIdeWingetId = 'Google.AntigravityIDE'
 $VSCodeWingetId = 'Microsoft.VisualStudioCode'
 $RustupWingetId = 'Rustlang.Rustup'
@@ -77,7 +80,6 @@ $NpmFlags = @('--no-fund', '--no-audit', '--no-update-notifier', '--loglevel', '
 $PipFlags = @('--disable-pip-version-check', '--no-input', '--quiet')
 
 $NpmCliSpecs = @{
-    claude   = @{ Label = 'Claude CLI';  Packages = @('@anthropic-ai/claude-code') }
     codex    = @{ Label = 'Codex CLI';   Packages = @('@openai/codex') }
     grok     = @{ Label = 'Grok CLI (Vibe Kit)'; Packages = @('@vibe-kit/grok-cli') }
     qwen     = @{ Label = 'Qwen CLI';    Packages = @('@qwen-code/qwen-code', 'qwen-code') }
@@ -849,7 +851,8 @@ function Unblock-WindowsCliFiles {
     $dirs = @(
         (Join-Path $env:APPDATA 'npm'),
         (Join-Path $env:LOCALAPPDATA 'agy\bin'),
-        (Join-Path $env:USERPROFILE '.cargo\bin')
+        (Join-Path $env:USERPROFILE '.cargo\bin'),
+        (Join-Path $env:USERPROFILE '.local\bin')
     )
     foreach ($dir in $dirs) {
         if (-not ($dir -and (Test-Path -LiteralPath $dir -PathType Container))) { continue }
@@ -934,73 +937,52 @@ function Configure-RtkIntegrations {
     }
 }
 
-function Repair-ClaudeAfterFailedUpdate {
-    param([Parameter(Mandatory = $true)][string]$NpmPath)
+function Get-ClaudeNativeExePath {
+    return (Join-Path $env:USERPROFILE '.local\bin\claude.exe')
+}
 
+# Claude Code ships via Anthropic's official native installer; a leftover
+# @anthropic-ai/claude-code npm install would shadow the native claude.exe on
+# PATH with stale npm shims, so uninstall the old package when present.
+function Remove-LegacyClaudeNpmInstall {
     if ($DryRun) {
-        Write-Log 'Dry-run: would check/repair Claude CLI native executable.'
-        return $true
+        Write-Log 'Dry-run: would remove a legacy @anthropic-ai/claude-code npm install if present.'
+        return
     }
-    if (-not (Test-Path -LiteralPath $NpmPath)) {
-        return $false
-    }
-
+    $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
+    if (-not $npmCmd) { return }
     try {
-        $npmBin = & $NpmPath prefix -g 2>$null
-        if (-not $npmBin) {
-            return $false
+        $prefix = & $npmCmd.Source prefix -g 2>$null
+        if (-not $prefix) { return }
+        $legacyDir = Join-Path $prefix.Trim() 'node_modules\@anthropic-ai\claude-code'
+        if (-not (Test-Path -LiteralPath $legacyDir)) { return }
+        Write-Log 'Removing legacy Claude CLI npm install (@anthropic-ai/claude-code)...'
+        $code = Invoke-ExternalCommand -Args (@($npmCmd.Source) + $NpmFlags + @('uninstall', '-g', $ClaudeLegacyNpmPackage))
+        if ($code -ne 0) {
+            Write-WarnLog "Legacy Claude npm uninstall exited with code $code; continuing with the native install."
         }
-        $npmBin = $npmBin.Trim()
-        $pkgDir = Join-Path $npmBin 'node_modules\@anthropic-ai\claude-code'
-        $binDir = Join-Path $pkgDir 'bin'
-        $claudeExe = Join-Path $binDir 'claude.exe'
-        if (-not (Test-Path -LiteralPath $binDir)) {
-            return (Test-Path -LiteralPath $claudeExe -PathType Leaf)
-        }
-
-        $orphans = @(Get-ChildItem -LiteralPath $binDir -Filter 'claude.exe.old.*' -File -ErrorAction SilentlyContinue)
-        if ($orphans.Count -gt 0) {
-            $orphans = $orphans | Sort-Object Name -Descending
-            if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) {
-                $latest = $orphans | Select-Object -First 1
-                try {
-                    Move-Item -LiteralPath $latest.FullName -Destination $claudeExe -Force -ErrorAction Stop
-                    Write-Log "Restored Claude CLI executable from $($latest.Name)."
-                    $orphans = $orphans | Where-Object { $_.FullName -ne $latest.FullName }
-                } catch {
-                    Write-WarnLog "Could not restore Claude CLI executable from orphan: $($_.Exception.Message)"
-                }
-            }
-        }
-
-        # Fallback: copy from the bundled native-arch package when bin/claude.exe
-        # is still missing (no .old orphan to restore from, or restore failed).
-        if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) {
-            $nativeCandidates = @(
-                (Join-Path $pkgDir 'node_modules\@anthropic-ai\claude-code-win32-x64\claude.exe'),
-                (Join-Path $pkgDir 'node_modules\@anthropic-ai\claude-code-win32-arm64\claude.exe')
-            )
-            foreach ($native in $nativeCandidates) {
-                if (Test-Path -LiteralPath $native -PathType Leaf) {
-                    try {
-                        Copy-Item -LiteralPath $native -Destination $claudeExe -Force -ErrorAction Stop
-                        Write-Log "Restored Claude CLI executable by copying from native package: $native"
-                        break
-                    } catch {
-                        Write-WarnLog "Could not copy native Claude binary $native : $($_.Exception.Message)"
-                    }
-                }
-            }
-        }
-
-        foreach ($o in $orphans) {
-            Remove-Item -LiteralPath $o.FullName -Force -ErrorAction SilentlyContinue
-        }
-        return (Test-Path -LiteralPath $claudeExe -PathType Leaf)
     } catch {
-        Write-WarnLog "Claude CLI repair check failed: $($_.Exception.Message)"
-        return $false
+        Write-WarnLog "Legacy Claude npm cleanup skipped: $($_.Exception.Message)"
     }
+}
+
+function Install-ClaudeNativeCli {
+    Remove-LegacyClaudeNpmInstall
+    Write-Log "Installing Claude Code CLI via Anthropic's official install.ps1..."
+    if ($DryRun) {
+        Write-Log "Dry-run: would run: Invoke-Expression (Invoke-RestMethod $ClaudeInstallPs1)"
+        return
+    }
+    try {
+        Invoke-Expression (Invoke-RestMethod $ClaudeInstallPs1)
+    } catch {
+        Throw-InstallError "Claude native installer failed: $($_.Exception.Message)"
+    }
+    $claudeExe = Get-ClaudeNativeExePath
+    if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) {
+        Throw-InstallError "Claude native installer finished, but $claudeExe was not found."
+    }
+    Write-Log 'Installed Claude Code CLI using the native installer.'
 }
 
 function Get-CodexCliProcesses {
@@ -1093,11 +1075,7 @@ function Install-NpmCliTarget {
     }
     $env:npm_config_update_notifier = 'false'
     foreach ($pkg in $spec.Packages) {
-        $isClaudePackage = $pkg -eq '@anthropic-ai/claude-code'
         $isCodexPackage = $pkg -eq '@openai/codex'
-        if ($isClaudePackage -and -not $DryRun) {
-            [void](Repair-ClaudeAfterFailedUpdate -NpmPath $NpmPath)
-        }
         if ($isCodexPackage -and -not $DryRun) {
             Remove-CodexNpmTempDirs -NpmPath $NpmPath
             if (Test-CodexCliRunning) {
@@ -1110,27 +1088,15 @@ function Install-NpmCliTarget {
         }
         Write-Log "Trying npm package for $($spec.Label): $pkg"
         $code = Invoke-ExternalCommand -Args (@($NpmPath) + $NpmFlags + @('install', '-g', '--include=optional', $pkg))
-        $claudeHealthy = $false
-        if ($isClaudePackage) {
-            $claudeHealthy = Repair-ClaudeAfterFailedUpdate -NpmPath $NpmPath
-        }
         if ($isCodexPackage -and -not $DryRun) {
             Remove-CodexNpmTempDirs -NpmPath $NpmPath
         }
         if ($code -eq 0) {
-            if ($isClaudePackage -and -not $claudeHealthy) {
-                Write-WarnLog 'Claude npm install returned success, but claude.exe could not be found.'
-                continue
-            }
             Write-Log "Installed $($spec.Label) using package $pkg"
             return
         }
         if ($isCodexPackage -and -not $DryRun -and (Test-CodexCliRunning)) {
             Write-WarnLog 'Codex npm install/update failed and Codex still appears to be running.'
-        }
-        if ($isClaudePackage -and $claudeHealthy) {
-            Write-WarnLog 'Claude npm install/update failed, but an existing claude.exe was restored. Continuing with the recovered installation.'
-            return
         }
     }
     Throw-InstallError "Failed to install $($spec.Label) via npm."
@@ -1385,7 +1351,7 @@ function Ensure-WindowsCliDirectoryPermissions {
 }
 
 function Unblock-WindowsCliFiles {
-  foreach ($dir in @((Join-Path $env:APPDATA 'npm'), (Join-Path $env:LOCALAPPDATA 'agy\bin'), (Join-Path $env:USERPROFILE '.cargo\bin'))) {
+  foreach ($dir in @((Join-Path $env:APPDATA 'npm'), (Join-Path $env:LOCALAPPDATA 'agy\bin'), (Join-Path $env:USERPROFILE '.cargo\bin'), (Join-Path $env:USERPROFILE '.local\bin'))) {
     if (-not ($dir -and (Test-Path -LiteralPath $dir -PathType Container))) { continue }
     try {
       Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
@@ -1491,75 +1457,42 @@ function Test-ClaudeCliRunning {
   }
 }
 
-# Claude's @anthropic-ai/claude-code postinstall (and Claude's own self-updater
-# / the Claude desktop app's winget upgrade) rename bin/claude.exe ->
-# bin/claude.exe.old.<ts> before swapping in a new binary. If the swap fails
-# (claude running -> EBUSY, missing platform package, interrupted download),
-# the install is left with no claude.exe and an orphan .old file. Restore the
-# latest .old when claude.exe is missing; if no orphan is available, or
-# claude.exe exists only as a tiny broken placeholder, copy from the
-# native-arch package; clean up stale .old files (each ~250MB) once
-# claude.exe is healthy.
-function Repair-ClaudeAfterFailedUpdate {
-  if (-not $npmPath) { return }
+# Claude Code ships via Anthropic's official native installer and self-updates
+# in place at %USERPROFILE%\.local\bin\claude.exe. Keep it fresh with
+# `claude update`, reinstall via install.ps1 when the exe is missing or the
+# update fails, and migrate any legacy @anthropic-ai/claude-code npm install
+# out of the way first (its npm shims would shadow the native exe on PATH).
+function Install-ClaudeNative {
   try {
-    $npmBin = & $npmPath prefix -g 2>$null
-    if (-not $npmBin) { return }
-    $npmBin = $npmBin.Trim()
-    $pkgDir = Join-Path $npmBin 'node_modules\@anthropic-ai\claude-code'
-    $binDir = Join-Path $pkgDir 'bin'
-    if (-not (Test-Path -LiteralPath $binDir)) { return }
-    $claudeExe = Join-Path $binDir 'claude.exe'
-    $orphans = @(Get-ChildItem -LiteralPath $binDir -Filter 'claude.exe.old.*' -File -ErrorAction SilentlyContinue)
-    if ($orphans.Count -gt 0) {
-      # `.old.<timestamp>` is monotonic, so name-desc gives the newest first.
-      $orphans = $orphans | Sort-Object Name -Descending
-      if (-not (Test-Path -LiteralPath $claudeExe)) {
-        $latest = $orphans | Select-Object -First 1
-        try {
-          Move-Item -LiteralPath $latest.FullName -Destination $claudeExe -Force -ErrorAction Stop
-          $orphans = $orphans | Where-Object { $_.FullName -ne $latest.FullName }
-        } catch { }
-      }
-    }
-    $needsNativeCopy = -not (Test-Path -LiteralPath $claudeExe)
-    if (-not $needsNativeCopy) {
-      try {
-        $current = Get-Item -LiteralPath $claudeExe -ErrorAction Stop
-        if ($current.Length -lt 1048576) { $needsNativeCopy = $true }
-      } catch { }
-    }
-    if ($needsNativeCopy) {
-      $nativeCandidates = @(
-        (Join-Path $pkgDir 'node_modules\@anthropic-ai\claude-code-win32-x64\claude.exe'),
-        (Join-Path $pkgDir 'node_modules\@anthropic-ai\claude-code-win32-arm64\claude.exe')
-      )
-      foreach ($native in $nativeCandidates) {
-        if (Test-Path -LiteralPath $native) {
-          try {
-            Copy-Item -LiteralPath $native -Destination $claudeExe -Force -ErrorAction Stop
-            break
-          } catch { }
-        }
-      }
-    }
-    foreach ($o in $orphans) {
-      Remove-Item -LiteralPath $o.FullName -Force -ErrorAction SilentlyContinue
-    }
+    Invoke-Expression (Invoke-RestMethod 'https://claude.ai/install.ps1') *>&1 | Out-Null
   } catch { }
+}
+
+function Update-ClaudeNative {
+  if (Test-ClaudeCliRunning) { return }
+  $claudeExe = Join-Path $env:USERPROFILE '.local\bin\claude.exe'
+  $hadLegacy = $false
+  if ($npmPath) {
+    try {
+      $prefix = Get-NpmPrefix
+      if ($prefix -and (Test-Path -LiteralPath (Join-Path $prefix 'node_modules\@anthropic-ai\claude-code'))) {
+        $hadLegacy = $true
+        & $npmPath @NpmFlags uninstall -g '@anthropic-ai/claude-code' *>&1 | Out-Null
+      }
+    } catch { }
+  }
+  if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) {
+    if ($hadLegacy) { Install-ClaudeNative }
+    return
+  }
+  & $claudeExe update *>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0) { Install-ClaudeNative }
 }
 
 function Test-NpmCliInstallHealth([string]$Package) {
   try {
     $prefix = Get-NpmPrefix
     if (-not $prefix) { return $false }
-    if ($Package -eq '@anthropic-ai/claude-code') {
-      $claudeExe = Join-Path $prefix 'node_modules\@anthropic-ai\claude-code\bin\claude.exe'
-      return ((Test-Path -LiteralPath (Join-Path $prefix 'claude.cmd') -PathType Leaf) -and
-        (Test-Path -LiteralPath (Join-Path $prefix 'claude.ps1') -PathType Leaf) -and
-        (Test-Path -LiteralPath $claudeExe -PathType Leaf) -and
-        ((Get-Item -LiteralPath $claudeExe).Length -ge 1048576))
-    }
     if ($Package -eq '@openai/codex') {
       $pkgDir = Join-Path $prefix 'node_modules\@openai\codex'
       $nativeRoot = Join-Path $pkgDir 'node_modules\@openai'
@@ -1575,20 +1508,18 @@ function Test-NpmCliInstallHealth([string]$Package) {
   } catch { return $false }
 }
 
-# Run Claude bin recovery upfront, before any npm work. The orphan can be
-# left by ANY update path that touches @anthropic-ai/claude-code (the Claude
-# desktop app's winget upgrade, a self-update from inside `claude`, a
-# half-applied npm install). Repairing eagerly lets every startup/logon/daily
-# trigger self-heal.
-Repair-ClaudeAfterFailedUpdate
+# Update Claude upfront, before any npm work. Claude is native-installed
+# (not an npm package); running eagerly also migrates the legacy
+# @anthropic-ai/claude-code npm install on machines that configured this
+# task before the native switch.
+Update-ClaudeNative
 
 # `npm i -g <pkg>@latest` is more reliable than `npm update -g`, which can
-# leave packages stale when their dist-tag pinning is unusual (codex / claude
-# both showed this in practice).
+# leave packages stale when their dist-tag pinning is unusual (codex
+# showed this in practice).
 function Update-NpmCli([string[]]$Candidates) {
   if (-not $npmPath) { return }
   foreach ($pkg in $Candidates) {
-    if ($pkg -eq '@anthropic-ai/claude-code') { Repair-ClaudeAfterFailedUpdate }
     & $npmPath list -g --depth=0 $pkg *> $null
     if ($LASTEXITCODE -ne 0) { continue }
     if ($pkg -eq '@openai/codex') {
@@ -1596,19 +1527,14 @@ function Update-NpmCli([string[]]$Candidates) {
       Stop-CodexCliForUpdate
       if (Test-CodexCliRunning) { return }
     }
-    if ($pkg -eq '@anthropic-ai/claude-code') {
-      if (Test-ClaudeCliRunning) { return }
-    }
     & $npmPath @NpmFlags i -g --include=optional ("$pkg@latest") *>&1 | Out-Null
     $installExit = $LASTEXITCODE
     if ($pkg -eq '@openai/codex') { Remove-CodexNpmTempDirs }
-    if ($pkg -eq '@anthropic-ai/claude-code') { Repair-ClaudeAfterFailedUpdate }
-    if ($pkg -in @('@anthropic-ai/claude-code', '@openai/codex') -and
+    if ($pkg -eq '@openai/codex' -and
         ($installExit -ne 0 -or -not (Test-NpmCliInstallHealth $pkg))) {
-      if ($pkg -eq '@openai/codex') { Remove-CodexNpmTempDirs }
+      Remove-CodexNpmTempDirs
       & $npmPath @NpmFlags i -g --include=optional --force ("$pkg@latest") *>&1 | Out-Null
-      if ($pkg -eq '@anthropic-ai/claude-code') { Repair-ClaudeAfterFailedUpdate }
-      if ($pkg -eq '@openai/codex') { Remove-CodexNpmTempDirs }
+      Remove-CodexNpmTempDirs
       if ($LASTEXITCODE -ne 0 -or -not (Test-NpmCliInstallHealth $pkg)) {
         throw "$pkg remains unusable after a forced reinstall"
       }
@@ -1618,7 +1544,6 @@ function Update-NpmCli([string[]]$Candidates) {
 }
 
 if ($npmPath) {
-  Update-NpmCli @("@anthropic-ai/claude-code")
   Update-NpmCli @("@openai/codex")
   Update-NpmCli @("@vibe-kit/grok-cli")
   Update-NpmCli @("@qwen-code/qwen-code","qwen-code")
@@ -1845,7 +1770,7 @@ Commands:
 function Install-Target {
     param([Parameter(Mandatory = $true)][string]$NormalizedTarget)
     switch ($NormalizedTarget) {
-        'claude'   { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'claude' -NpmPath $npm }
+        'claude'   { Install-ClaudeNativeCli }
         'codex'    { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'codex' -NpmPath $npm }
         'antigravity' { Install-Antigravity }
         'antigravity_cli' { Install-AntigravityCli }
@@ -1870,8 +1795,9 @@ function Install-Target {
 }
 
 function Install-AllTargets {
+    Install-ClaudeNativeCli
     $npm = Ensure-NodeAndNpm
-    foreach ($key in @('claude','codex','grok','qwen','copilot','openclaw','ironclaw')) {
+    foreach ($key in @('codex','grok','qwen','copilot','openclaw','ironclaw')) {
         Install-NpmCliTarget -Key $key -NpmPath $npm
     }
     Install-MistralVibe

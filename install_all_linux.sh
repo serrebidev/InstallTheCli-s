@@ -10,6 +10,8 @@ SUBCOMMAND="install-all"
 TARGET="all"
 
 OLLAMA_INSTALL_URL="https://ollama.com/install.sh"
+CLAUDE_INSTALL_URL="https://claude.ai/install.sh"
+CLAUDE_LEGACY_NPM_PACKAGE="@anthropic-ai/claude-code"
 ANTIGRAVITY_GCS_LIST_URL="https://storage.googleapis.com/storage/v1/b/antigravity-public/o?prefix=antigravity-hub/&delimiter=/"
 ANTIGRAVITY_GCS_BASE="https://storage.googleapis.com/antigravity-public/"
 ANTIGRAVITY_INSTALL_DIR="/opt/antigravity"
@@ -63,7 +65,8 @@ Options:
 
 This script installs:
   - Node.js + npm (distro package manager)
-  - Claude CLI, Codex CLI, Grok CLI, Qwen CLI, GitHub Copilot CLI,
+  - Claude CLI (Anthropic's official native installer, claude.ai/install.sh)
+  - Codex CLI, Grok CLI, Qwen CLI, GitHub Copilot CLI,
     OpenClaw CLI, IronClaw CLI (npm)
   - Mistral Vibe CLI (Python 3.12+ + pip/uv)
   - Ollama (official install script)
@@ -347,8 +350,31 @@ install_npm_cli() {
   die "Failed to install ${label} via npm."
 }
 
+# Claude Code ships via Anthropic's official native installer. A leftover
+# @anthropic-ai/claude-code npm install would shadow the native binary with
+# stale npm shims, so migrate it out of the way first.
+remove_legacy_claude_npm_install() {
+  if ! command_exists npm || ! npm_package_installed "$CLAUDE_LEGACY_NPM_PACKAGE"; then
+    return 0
+  fi
+  log "Removing legacy Claude CLI npm install (${CLAUDE_LEGACY_NPM_PACKAGE})"
+  run_cmd npm "${NPM_FLAGS[@]}" uninstall -g "$CLAUDE_LEGACY_NPM_PACKAGE" \
+    || warn "Legacy Claude npm uninstall failed; continuing with the native install."
+}
+
+install_claude_native() {
+  if (( DRY_RUN )); then
+    log "[dry-run] install Claude Code CLI via official installer (${CLAUDE_INSTALL_URL})"
+    return 0
+  fi
+  command_exists curl || install_linux_packages curl
+  remove_legacy_claude_npm_install
+  log "Installing Claude Code CLI via Anthropic's official installer..."
+  run_shell "curl -fsSL ${CLAUDE_INSTALL_URL} | bash"
+  ensure_root_local_symlink "${HOME}/.local/bin/claude" "/usr/local/bin/claude"
+}
+
 install_all_npm_clis() {
-  install_npm_cli "Claude CLI" "@anthropic-ai/claude-code"
   install_npm_cli "Codex CLI" "@openai/codex"
   install_npm_cli "Grok CLI (Vibe Kit)" "@vibe-kit/grok-cli"
   install_npm_cli "Qwen CLI" "@qwen-code/qwen-code" "qwen-code"
@@ -360,7 +386,6 @@ install_all_npm_clis() {
 install_npm_target() {
   local target="$1"
   case "$target" in
-    claude) install_npm_cli "Claude CLI" "@anthropic-ai/claude-code" ;;
     codex) install_npm_cli "Codex CLI" "@openai/codex" ;;
     grok) install_npm_cli "Grok CLI (Vibe Kit)" "@vibe-kit/grok-cli" ;;
     qwen) install_npm_cli "Qwen CLI" "@qwen-code/qwen-code" "qwen-code" ;;
@@ -646,6 +671,7 @@ install_rtk() {
 }
 
 install_all_targets() {
+  install_claude_native
   install_all_npm_clis
   install_mistral_vibe
   install_ollama_official
@@ -681,7 +707,10 @@ install_single_target() {
     rtk)
       install_rtk
       ;;
-    claude|codex|grok|qwen|copilot|openclaw|ironclaw)
+    claude)
+      install_claude_native
+      ;;
+    codex|grok|qwen|copilot|openclaw|ironclaw)
       install_npm_target "$target_key"
       ;;
     *)
@@ -703,6 +732,8 @@ HOME="$(getent passwd 0 2>/dev/null | cut -d: -f6)"
 export HOME
 LOG_PREFIX="[installthecli-update]"
 OLLAMA_INSTALL_URL="https://ollama.com/install.sh"
+CLAUDE_INSTALL_URL="https://claude.ai/install.sh"
+CLAUDE_LEGACY_NPM_PACKAGE="@anthropic-ai/claude-code"
 NPM_FLAGS=(--no-fund --no-audit --no-update-notifier --loglevel error)
 PIP_FLAGS=(--disable-pip-version-check --no-input --quiet --break-system-packages --root-user-action=ignore)
 
@@ -745,12 +776,32 @@ update_npm_cli() {
   return 0
 }
 
+# Claude Code ships via Anthropic's official native installer (not npm).
+# Keep it fresh with `claude update`; migrate a legacy npm install out of
+# the way first because its shims would shadow the native binary on PATH.
+update_claude_native() {
+  if command_exists npm && npm_package_installed "$CLAUDE_LEGACY_NPM_PACKAGE"; then
+    log "Migrating Claude CLI from npm to the native installer"
+    run_cmd npm "${NPM_FLAGS[@]}" uninstall -g "$CLAUDE_LEGACY_NPM_PACKAGE" || true
+    if command_exists curl; then
+      run_shell "curl -fsSL ${CLAUDE_INSTALL_URL} | bash" || true
+      ensure_root_symlink_if_missing "${HOME}/.local/bin/claude" "/usr/local/bin/claude"
+    fi
+  fi
+  if [[ -x "${HOME}/.local/bin/claude" ]]; then
+    run_cmd "${HOME}/.local/bin/claude" update || true
+  elif command_exists claude; then
+    run_cmd claude update || true
+  else
+    log "Claude CLI not installed; skipping Claude update"
+  fi
+}
+
 update_npm_all() {
   if ! command_exists npm; then
     log "npm not found; skipping npm CLI updates"
     return 0
   fi
-  update_npm_cli "Claude CLI" "@anthropic-ai/claude-code"
   update_npm_cli "Codex CLI" "@openai/codex"
   update_npm_cli "Grok CLI (Vibe Kit)" "@vibe-kit/grok-cli"
   update_npm_cli "Qwen CLI" "@qwen-code/qwen-code" "qwen-code"
@@ -863,6 +914,7 @@ update_rtk() {
 }
 
 main() {
+  update_claude_native
   update_npm_all
   update_mistral_vibe
   update_ollama

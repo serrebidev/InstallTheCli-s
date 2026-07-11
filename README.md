@@ -14,8 +14,8 @@ A vibe-coded installer for Windows, macOS, and Linux that sets up all the popula
 - Installs prerequisites for you when missing: Node.js/npm, Python 3.14 (Windows), pip/uv, and Homebrew on macOS (it asks first).
 - Adds CLI directories to PATH and creates desktop shortcuts.
 - Sets up silent background auto-updates: a hidden Scheduled Task on Windows (startup, logon, and daily — no popup windows), a LaunchAgent on macOS, and cron on Linux.
-- Repairs broken installs automatically — for example a Claude CLI left half-updated by an interrupted upgrade is restored on the next updater run.
-- Uses official sources: winget, Homebrew, npm, Microsoft Store, and vendor installer scripts.
+- Repairs broken installs automatically — for example a missing or broken Claude CLI is reinstalled from Anthropic's official installer on the next updater run, and old npm-based Claude installs are migrated to the native install.
+- Uses official sources: winget, Homebrew, npm, Microsoft Store, and vendor installer scripts (Claude installs via Anthropic's official native installer from claude.ai).
 
 ## Download and install
 

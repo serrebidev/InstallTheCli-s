@@ -77,7 +77,12 @@ MACOS_AUTO_UPDATE_SCRIPT_FILE = "auto_update_clis_macos.sh"
 MACOS_AUTO_UPDATE_PLIST_ID = "com.installthecli.ai-cli-updates"
 MACOS_AUTO_UPDATE_PLIST_FILE = MACOS_AUTO_UPDATE_PLIST_ID + ".plist"
 CODEX_NPM_PACKAGE = "@openai/codex"
-CLAUDE_NPM_PACKAGE = "@anthropic-ai/claude-code"
+# Claude Code ships via Anthropic's official native installer (claude.ai).
+# The npm package is legacy-only: we migrate it out of the way because its
+# npm shims shadow the native %USERPROFILE%\.local\bin\claude.exe on PATH.
+CLAUDE_LEGACY_NPM_PACKAGE = "@anthropic-ai/claude-code"
+CLAUDE_INSTALL_PS1 = "https://claude.ai/install.ps1"
+CLAUDE_INSTALL_SH = "https://claude.ai/install.sh"
 GROK_NPM_PACKAGE = "@vibe-kit/grok-cli"
 OPENCLAW_NPM_PACKAGE = "openclaw"
 GUI_LAST_RUN_LOG_FILE = "gui_last_run.log"
@@ -129,9 +134,10 @@ class CliSpec:
 
 
 def cli_is_app_installer(spec: "CliSpec") -> bool:
-    """True for IDE-style CLIs installed via winget/brew-cask/direct-download
-    (Antigravity, VS Code, Antigravity CLI) rather than npm/pip/cargo."""
-    return bool(spec.winget_id or spec.linux_install_kind or spec.key == "antigravity_cli")
+    """True for CLIs installed via winget/brew-cask/direct-download/official
+    installer (Antigravity, VS Code, Antigravity CLI, Claude) rather than
+    npm/pip/cargo."""
+    return bool(spec.winget_id or spec.linux_install_kind or spec.key in ("antigravity_cli", "claude"))
 
 
 @dataclass(frozen=True)
@@ -154,8 +160,11 @@ CLI_SPECS: tuple[CliSpec, ...] = (
     CliSpec(
         key="claude",
         label="Claude CLI",
-        help_text="Installs Anthropic Claude Code CLI from npm.",
-        package_candidates=("@anthropic-ai/claude-code",),
+        help_text=(
+            "Installs Anthropic Claude Code CLI using Anthropic's official native "
+            "installer (Windows: install.ps1; Linux: install.sh; macOS: Homebrew cask claude-code)."
+        ),
+        package_candidates=("claude-code",),
         command_candidates=("claude",),
         shortcut_name="Claude CLI",
         macos_brew_cask="claude-code",
@@ -944,7 +953,7 @@ function Ensure-WindowsCliDirectoryPermissions {
 }
 
 function Unblock-WindowsCliFiles {
-  foreach ($dir in @((Join-Path $env:APPDATA 'npm'), (Join-Path $env:LOCALAPPDATA 'agy\bin'), (Join-Path $env:USERPROFILE '.cargo\bin'))) {
+  foreach ($dir in @((Join-Path $env:APPDATA 'npm'), (Join-Path $env:LOCALAPPDATA 'agy\bin'), (Join-Path $env:USERPROFILE '.cargo\bin'), (Join-Path $env:USERPROFILE '.local\bin'))) {
     if (-not ($dir -and (Test-Path -LiteralPath $dir -PathType Container))) { continue }
     try {
       Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
@@ -1015,7 +1024,7 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         powershell_single_quote(flag) for flag in NPM_QUIET_FLAGS
     )
     codex_pkg_literal = powershell_single_quote(CODEX_NPM_PACKAGE)
-    claude_pkg_literal = powershell_single_quote(CLAUDE_NPM_PACKAGE)
+    claude_pkg_literal = powershell_single_quote(CLAUDE_LEGACY_NPM_PACKAGE)
     lines = [
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
@@ -1081,13 +1090,12 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "  while ((Get-Date) -lt $deadline -and (Test-CodexCliRunning)) { Start-Sleep -Milliseconds 500 }",
         "  if (-not (Test-CodexCliRunning)) { Start-Sleep -Seconds 1 }",
         "}",
-        # Claude self-updater (and the @anthropic-ai/claude-code postinstall)
-        # rename bin/claude.exe -> bin/claude.exe.old.<ts> before swapping in
-        # a new binary. If the swap fails (claude running -> EBUSY, missing
-        # platform package, interrupted download), the install is left with
-        # no claude.exe and an orphan .old file. Restore the latest .old when
-        # claude.exe is missing; clean up stale .old files (each ~250MB) when
-        # claude.exe is healthy.
+        # Claude Code ships via Anthropic's official native installer and
+        # self-updates in place at %USERPROFILE%\.local\bin\claude.exe. Keep
+        # it fresh with `claude update`, reinstall via install.ps1 when the
+        # exe is missing or the update fails, and migrate any legacy
+        # @anthropic-ai/claude-code npm install out of the way first (its
+        # npm shims would shadow the native claude.exe on PATH).
         "function Test-ClaudeCliRunning {",
         "  try {",
         "    $matches = Get-CimInstance Win32_Process -Filter \"name = 'claude.exe'\" -ErrorAction SilentlyContinue | Select-Object -First 1",
@@ -1096,66 +1104,33 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "    return $false",
         "  }",
         "}",
-        "function Repair-ClaudeAfterFailedUpdate {",
+        "function Install-ClaudeNative {",
+        "  try {",
+        f"    Invoke-Expression (Invoke-RestMethod {powershell_single_quote(CLAUDE_INSTALL_PS1)}) *>&1 | Out-Null",
+        "  } catch { }",
+        "}",
+        "function Update-ClaudeNative {",
+        "  if (Test-ClaudeCliRunning) { return }",
+        "  $claudeExe = Join-Path $env:USERPROFILE '.local\\bin\\claude.exe'",
+        "  $hadLegacy = $false",
         "  try {",
         "    $prefix = Get-NpmPrefix",
-        "    if (-not $prefix) { return }",
-        "    $pkgDir = Join-Path $prefix 'node_modules\\@anthropic-ai\\claude-code'",
-        "    $binDir = Join-Path $pkgDir 'bin'",
-        "    if (-not (Test-Path -LiteralPath $binDir)) { return }",
-        "    $claudeExe = Join-Path $binDir 'claude.exe'",
-        "    $orphans = @(Get-ChildItem -LiteralPath $binDir -Filter 'claude.exe.old.*' -File -ErrorAction SilentlyContinue)",
-        "    if ($orphans.Count -gt 0) {",
-        "      $orphans = $orphans | Sort-Object Name -Descending",
-        "      if (-not (Test-Path -LiteralPath $claudeExe)) {",
-        "        $latest = $orphans | Select-Object -First 1",
-        "        try {",
-        "          Move-Item -LiteralPath $latest.FullName -Destination $claudeExe -Force -ErrorAction Stop",
-        "          $orphans = $orphans | Where-Object { $_.FullName -ne $latest.FullName }",
-        "        } catch { }",
-        "      }",
-        "    }",
-        # Fallback: if claude.exe is still missing OR is an implausibly tiny
-        # broken placeholder, copy from the optional native-arch package
-        # bundled under node_modules/. The .old file may already be gone
-        # (cleaned up earlier), or the rename half completed.
-        "    $needsNativeCopy = -not (Test-Path -LiteralPath $claudeExe)",
-        "    if (-not $needsNativeCopy) {",
-        "      try {",
-        "        $current = Get-Item -LiteralPath $claudeExe -ErrorAction Stop",
-        "        if ($current.Length -lt 1048576) { $needsNativeCopy = $true }",
-        "      } catch { }",
-        "    }",
-        "    if ($needsNativeCopy) {",
-        "      $nativeCandidates = @(",
-        "        (Join-Path $pkgDir 'node_modules\\@anthropic-ai\\claude-code-win32-x64\\claude.exe'),",
-        "        (Join-Path $pkgDir 'node_modules\\@anthropic-ai\\claude-code-win32-arm64\\claude.exe')",
-        "      )",
-        "      foreach ($native in $nativeCandidates) {",
-        "        if (Test-Path -LiteralPath $native) {",
-        "          try {",
-        "            Copy-Item -LiteralPath $native -Destination $claudeExe -Force -ErrorAction Stop",
-        "            break",
-        "          } catch { }",
-        "        }",
-        "      }",
-        "    }",
-        "    foreach ($o in $orphans) {",
-        "      Remove-Item -LiteralPath $o.FullName -Force -ErrorAction SilentlyContinue",
+        "    if ($prefix -and (Test-Path -LiteralPath (Join-Path $prefix 'node_modules\\@anthropic-ai\\claude-code'))) {",
+        "      $hadLegacy = $true",
+        f"      $null = & $npm {npm_quiet_args} 'uninstall' '-g' {claude_pkg_literal} *>&1",
         "    }",
         "  } catch { }",
+        "  if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) {",
+        "    if ($hadLegacy) { Install-ClaudeNative }",
+        "    return",
+        "  }",
+        "  $null = & $claudeExe update *>&1",
+        "  if ($LASTEXITCODE -ne 0) { Install-ClaudeNative }",
         "}",
         "function Test-NpmCliInstallHealth([string]$Package) {",
         "  try {",
         "    $prefix = Get-NpmPrefix",
         "    if (-not $prefix) { return $false }",
-        "    if ($Package -eq '@anthropic-ai/claude-code') {",
-        "      $claudeExe = Join-Path $prefix 'node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe'",
-        "      return ((Test-Path -LiteralPath (Join-Path $prefix 'claude.cmd') -PathType Leaf) -and",
-        "        (Test-Path -LiteralPath (Join-Path $prefix 'claude.ps1') -PathType Leaf) -and",
-        "        (Test-Path -LiteralPath $claudeExe -PathType Leaf) -and",
-        "        ((Get-Item -LiteralPath $claudeExe).Length -ge 1048576))",
-        "    }",
         "    if ($Package -eq '@openai/codex') {",
         "      $pkgDir = Join-Path $prefix 'node_modules\\@openai\\codex'",
         "      $nativeRoot = Join-Path $pkgDir 'node_modules\\@openai'",
@@ -1170,14 +1145,12 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "    return $true",
         "  } catch { return $false }",
         "}",
-        # Run a Claude bin recovery upfront, before reading $packages or doing
-        # any npm work. The orphan claude.exe.old.<ts> can be left behind by
-        # ANY update path that touches @anthropic-ai/claude-code (the Claude
-        # desktop app's winget update, a self-update from inside `claude`, a
-        # half-applied npm install). By repairing eagerly we ensure this
-        # scheduled task self-heals at every startup/logon/daily run, even
-        # when the user's $packages list does not include Claude.
-        "Repair-ClaudeAfterFailedUpdate",
+        # Update Claude upfront, before reading $packages or doing any npm
+        # work. Claude is native-installed (not an npm package), so it never
+        # appears in new packages files; running eagerly also migrates the
+        # legacy @anthropic-ai/claude-code npm install on machines that
+        # configured this task before the native switch.
+        "Update-ClaudeNative",
         f"$packagesFile = {powershell_single_quote(packages_file)}",
         "if (-not (Test-Path -LiteralPath $packagesFile)) { exit 0 }",
         "$packages = Get-Content -LiteralPath $packagesFile -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() } | Where-Object { $_ }",
@@ -1192,19 +1165,17 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "    Stop-CodexCliForUpdate",
         "    if (Test-CodexCliRunning) { continue }",
         "  }",
-        f"  if ($pkg -eq {claude_pkg_literal}) {{",
-        "    Repair-ClaudeAfterFailedUpdate",
-        "    if (Test-ClaudeCliRunning) { continue }",
-        "  }",
+        # Legacy packages files may still list the old Claude npm package;
+        # the eager Update-ClaudeNative above already migrated it, so never
+        # feed it back to npm here.
+        f"  if ($pkg -eq {claude_pkg_literal}) {{ continue }}",
         f"  $null = & $npm {npm_quiet_args} 'i' '-g' '--include=optional' (\"$pkg@latest\") *>&1",
         "  $installExit = $LASTEXITCODE",
         f"  if ($pkg -eq {codex_pkg_literal}) {{ Remove-CodexNpmTempDirs }}",
-        f"  if ($pkg -eq {claude_pkg_literal}) {{ Repair-ClaudeAfterFailedUpdate }}",
-        f"  if ($pkg -in @({claude_pkg_literal}, {codex_pkg_literal}) -and",
+        f"  if ($pkg -eq {codex_pkg_literal} -and",
         "      ($installExit -ne 0 -or -not (Test-NpmCliInstallHealth $pkg))) {",
-        "    if ($pkg -eq '@openai/codex') { Remove-CodexNpmTempDirs }",
+        "    Remove-CodexNpmTempDirs",
         f"    $null = & $npm {npm_quiet_args} 'i' '-g' '--include=optional' '--force' (\"$pkg@latest\") *>&1",
-        f"    if ($pkg -eq {claude_pkg_literal}) {{ Repair-ClaudeAfterFailedUpdate }}",
         f"    if ($pkg -eq {codex_pkg_literal}) {{ Remove-CodexNpmTempDirs }}",
         "    if ($LASTEXITCODE -ne 0 -or -not (Test-NpmCliInstallHealth $pkg)) {",
         "      throw \"$pkg remains unusable after a forced reinstall\"",
@@ -1362,7 +1333,13 @@ def ensure_cli_auto_update_task(
     vbs_file = os.path.join(support_dir, AUTO_UPDATE_VBS_FILE)
 
     existing_packages = read_nonempty_lines(packages_file)
-    merged_packages = dedupe_preserve_order(existing_packages + clean_packages)
+    # Drop the legacy Claude npm package from carried-over state; Claude is
+    # native-installed now and the updater script handles it directly.
+    merged_packages = [
+        pkg
+        for pkg in dedupe_preserve_order(existing_packages + clean_packages)
+        if pkg != CLAUDE_LEGACY_NPM_PACKAGE
+    ]
 
     write_nonempty_lines(packages_file, merged_packages)
     write_text_file(script_file, build_cli_auto_update_script(npm_exe, packages_file))
@@ -2151,82 +2128,34 @@ def get_npm_global_prefix(npm_exe: str, log: Callable[[str], None]) -> Optional[
     return None
 
 
-def repair_claude_after_failed_update(npm_exe: str, log: Callable[[str], None]) -> bool:
-    if not is_windows():
-        return False
+def remove_legacy_claude_npm_install(log: Callable[[str], None]) -> bool:
+    """Uninstall a leftover @anthropic-ai/claude-code npm global install.
 
+    Claude Code ships via Anthropic's native installer now; leftover npm
+    shims (claude.cmd/claude.ps1/claude in the npm prefix) would shadow the
+    native ~/.local/bin claude executable on PATH. Returns True when a
+    legacy install was found (whether or not the uninstall fully succeeded).
+    """
+    npm_exe = find_npm()
+    if not npm_exe:
+        return False
     prefix = get_npm_global_prefix(npm_exe, log)
     if not prefix:
         return False
-
-    pkg_dir = os.path.join(prefix, "node_modules", "@anthropic-ai", "claude-code")
-    bin_dir = os.path.join(pkg_dir, "bin")
-    claude_exe = os.path.join(bin_dir, "claude.exe")
-    if not os.path.isdir(bin_dir):
-        return os.path.isfile(claude_exe)
-
-    orphans = sorted(
-        (
-            path
-            for path in glob.glob(os.path.join(bin_dir, "claude.exe.old.*"))
-            if os.path.isfile(path)
-        ),
-        key=lambda path: os.path.basename(path),
-        reverse=True,
+    legacy_candidates = (
+        os.path.join(prefix, "node_modules", "@anthropic-ai", "claude-code"),
+        os.path.join(prefix, "lib", "node_modules", "@anthropic-ai", "claude-code"),
     )
-
-    if not os.path.isfile(claude_exe) and orphans:
-        latest = orphans[0]
-        try:
-            os.replace(latest, claude_exe)
-            log(f"Restored Claude CLI executable from {os.path.basename(latest)}.")
-            orphans = orphans[1:]
-        except OSError as exc:
-            log(f"Warning: could not restore Claude CLI executable: {exc}")
-
-    # Fall back to copying from the optional native-arch package when the
-    # bin/claude.exe is still missing or exists only as an implausibly tiny
-    # broken placeholder (e.g. the .old file is gone, or the rename succeeded
-    # but the new download never landed). The native package ships the same
-    # Win32 binary that the postinstall normally hard-links into bin/claude.exe.
-    needs_native_copy = not os.path.isfile(claude_exe)
-    if not needs_native_copy:
-        try:
-            size = os.path.getsize(claude_exe)
-            if size < 1024 * 1024:
-                log(
-                    "Claude CLI executable is unexpectedly small "
-                    f"({size} bytes); restoring from native package."
-                )
-                needs_native_copy = True
-        except OSError as exc:
-            log(f"Warning: could not stat Claude CLI executable: {exc}")
-    if needs_native_copy:
-        native_candidates = (
-            os.path.join(
-                pkg_dir, "node_modules", "@anthropic-ai", "claude-code-win32-x64", "claude.exe"
-            ),
-            os.path.join(
-                pkg_dir, "node_modules", "@anthropic-ai", "claude-code-win32-arm64", "claude.exe"
-            ),
+    if not any(os.path.isdir(candidate) for candidate in legacy_candidates):
+        return False
+    log("Removing legacy Claude CLI npm install (@anthropic-ai/claude-code)...")
+    code = npm_uninstall_global(npm_exe, CLAUDE_LEGACY_NPM_PACKAGE, log)
+    if code != 0:
+        log(
+            "Warning: legacy Claude npm uninstall exited with code "
+            f"{format_exit_code(code)}; continuing with the native install."
         )
-        for native in native_candidates:
-            if not os.path.isfile(native):
-                continue
-            try:
-                shutil.copyfile(native, claude_exe)
-                log(f"Restored Claude CLI executable by copying from native package: {native}")
-                break
-            except OSError as exc:
-                log(f"Warning: could not copy native Claude binary {native}: {exc}")
-
-    for orphan in orphans:
-        try:
-            os.remove(orphan)
-        except OSError as exc:
-            log(f"Warning: could not remove stale Claude CLI backup {os.path.basename(orphan)}: {exc}")
-
-    return os.path.isfile(claude_exe)
+    return True
 
 
 def remove_codex_npm_temp_dirs(npm_exe: str, log: Callable[[str], None]) -> None:
@@ -2807,7 +2736,13 @@ def get_app_cli_bin_dirs(spec: CliSpec, log: Callable[[str], None]) -> list[str]
     """Directories that may contain the editor's CLI shim after install."""
     del log  # kept for call-shape consistency with the other *_bin_dirs helpers
     dirs: list[str] = []
-    if spec.key == "antigravity_cli":
+    if spec.key == "claude":
+        # Anthropic's native installer puts claude(.exe) in ~/.local/bin on
+        # Windows/Linux; the macOS Homebrew cask links into the brew bins.
+        dirs.append(os.path.join(os.path.expanduser("~"), ".local", "bin"))
+        if not is_windows():
+            dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"])
+    elif spec.key == "antigravity_cli":
         if is_windows():
             local_app = os.environ.get("LocalAppData")
             if local_app:
@@ -3074,7 +3009,24 @@ def install_vscode_linux(log: Callable[[str], None]) -> tuple[bool, Optional[str
 
 
 def ensure_app_cli(spec: CliSpec, log: Callable[[str], None]) -> tuple[bool, Optional[str]]:
-    """Install an IDE-style CLI (Antigravity, VS Code, Antigravity CLI) on the current platform."""
+    """Install an IDE-style/official-installer CLI (Antigravity, VS Code,
+    Antigravity CLI, Claude) on the current platform."""
+    if spec.key == "claude" and not is_macos():
+        remove_legacy_claude_npm_install(log)
+        if is_windows():
+            log("Installing Claude Code CLI via Anthropic's official install.ps1...")
+            cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                   f"Invoke-Expression (Invoke-RestMethod '{CLAUDE_INSTALL_PS1}')"]
+            code = run_command(cmd, log)
+            if code == 0:
+                return (True, "claude-code")
+            return (False, f"Claude native installer failed with exit code {format_exit_code(code)}")
+        log("Installing Claude Code CLI via Anthropic's official install.sh...")
+        code = run_command(["/bin/bash", "-c", f"curl -fsSL {CLAUDE_INSTALL_SH} | /bin/bash"], log)
+        if code == 0:
+            return (True, "claude-code")
+        return (False, f"Claude native installer failed with exit code {format_exit_code(code)}")
+
     if spec.key == "antigravity_cli":
         if is_windows():
             log("Installing standalone Antigravity CLI via Google's install.ps1...")
@@ -3108,6 +3060,26 @@ def ensure_app_cli(spec: CliSpec, log: Callable[[str], None]) -> tuple[bool, Opt
 
 
 def uninstall_app_cli(spec: CliSpec, log: Callable[[str], None]) -> tuple[bool, Optional[str]]:
+    if spec.key == "claude" and not is_macos():
+        remove_legacy_claude_npm_install(log)
+        home = os.path.expanduser("~")
+        if is_windows():
+            targets = [os.path.join(home, ".local", "bin", "claude.exe")]
+        else:
+            targets = [
+                os.path.join(home, ".local", "bin", "claude"),
+                os.path.join(home, ".local", "share", "claude"),
+            ]
+        for target in targets:
+            try:
+                if os.path.isdir(target) and not os.path.islink(target):
+                    shutil.rmtree(target, ignore_errors=True)
+                elif os.path.lexists(target):
+                    os.remove(target)
+            except OSError as exc:
+                log(f"Warning: failed to remove {target}: {exc}")
+        return (True, "claude-code")
+
     if spec.key == "antigravity_cli":
         if is_windows():
             local_app = os.environ.get("LocalAppData")
@@ -4356,10 +4328,7 @@ def try_install_package_candidates(
 ) -> tuple[bool, Optional[str]]:
     last_error: Optional[str] = None
     for package_name in spec.package_candidates:
-        is_claude_package = package_name == CLAUDE_NPM_PACKAGE
         is_codex_package = package_name == CODEX_NPM_PACKAGE
-        if is_claude_package:
-            repair_claude_after_failed_update(npm_exe, log)
         if is_codex_package and is_windows():
             remove_codex_npm_temp_dirs(npm_exe, log)
             if not close_codex_cli_for_update(log):
@@ -4370,22 +4339,9 @@ def try_install_package_candidates(
             suffix = "" if attempt == 1 else f" (attempt {attempt}/{NPM_INSTALL_MAX_ATTEMPTS})"
             log(f"Trying npm package for {spec.label}: {package_name}{suffix}")
             code = npm_install_global(npm_exe, package_name, log)
-            claude_repaired = False
-            if is_claude_package:
-                claude_repaired = repair_claude_after_failed_update(npm_exe, log)
             if is_codex_package and is_windows():
                 remove_codex_npm_temp_dirs(npm_exe, log)
             if code == 0:
-                if is_claude_package and is_windows() and not claude_repaired:
-                    last_error = f"{package_name} installed, but claude.exe was not found"
-                    log(last_error)
-                    break
-                return (True, package_name)
-            if claude_repaired:
-                log(
-                    "Warning: Claude CLI install/update failed, but an existing "
-                    "claude.exe was restored. Continuing with the recovered installation."
-                )
                 return (True, package_name)
 
             if attempt < NPM_INSTALL_MAX_ATTEMPTS and is_probably_windows_errno_exit_code(code):
