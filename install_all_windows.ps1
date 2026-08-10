@@ -15,7 +15,7 @@ Also configures a hidden Scheduled Task (startup, logon, daily) unless disabled.
 Subcommand: install-all (default), install, list, setup-updater, help.
 
 .PARAMETER Target
-Target for the install subcommand: claude, codex, antigravity, vscode, grok, qwen, copilot, openclaw, ironclaw, mistral, ollama, all.
+Target for the install subcommand: claude, codex, antigravity, vscode, grok, qwen, copilot, openclaw, ironclaw, freebuff, mistral, ollama, all.
 
 .PARAMETER NoAutoUpdate
 Skips creation/update of the hidden scheduled auto-update task.
@@ -86,6 +86,7 @@ $NpmCliSpecs = @{
     copilot  = @{ Label = 'GitHub Copilot CLI'; Packages = @('@github/copilot', '@githubnext/github-copilot-cli') }
     openclaw = @{ Label = 'OpenClaw CLI'; Packages = @('openclaw') }
     ironclaw = @{ Label = 'IronClaw CLI'; Packages = @('ironclaw') }
+    freebuff = @{ Label = 'Freebuff CLI'; Packages = @('freebuff') }
 }
 
 function Write-Log {
@@ -860,7 +861,7 @@ function Unblock-WindowsCliFiles {
             Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
                 Where-Object {
                     $_.Extension -in @('.ps1', '.cmd', '.bat', '.exe') -or
-                    $_.Name -match '^(codex|claude|agy|rtk|grok|qwen|copilot|github-copilot|openclaw|ironclaw|mistral-vibe|vibe)(\..*)?$'
+                    $_.Name -match '^(codex|claude|agy|rtk|grok|qwen|copilot|github-copilot|openclaw|ironclaw|freebuff|mistral-vibe|vibe)(\..*)?$'
                 } |
                 ForEach-Object {
                     Unblock-File -LiteralPath $_.FullName -ErrorAction SilentlyContinue
@@ -1355,7 +1356,7 @@ function Unblock-WindowsCliFiles {
     if (-not ($dir -and (Test-Path -LiteralPath $dir -PathType Container))) { continue }
     try {
       Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Extension -in @('.ps1','.cmd','.bat','.exe') -or $_.Name -match '^(codex|claude|agy|rtk|grok|qwen|copilot|github-copilot|openclaw|ironclaw|mistral-vibe|vibe)(\..*)?$' } |
+        Where-Object { $_.Extension -in @('.ps1','.cmd','.bat','.exe') -or $_.Name -match '^(codex|claude|agy|rtk|grok|qwen|copilot|github-copilot|openclaw|ironclaw|freebuff|mistral-vibe|vibe)(\..*)?$' } |
         ForEach-Object { Unblock-File -LiteralPath $_.FullName -ErrorAction SilentlyContinue }
     } catch { }
   }
@@ -1550,6 +1551,7 @@ if ($npmPath) {
   Update-NpmCli @("@github/copilot","@githubnext/github-copilot-cli")
   Update-NpmCli @("openclaw")
   Update-NpmCli @("ironclaw")
+  Update-NpmCli @("freebuff")
 }
 
 if (Test-Cmd "py") {
@@ -1749,7 +1751,7 @@ function Ensure-HiddenAutoUpdateTask {
 
 function Show-Targets {
     @(
-        'claude', 'codex', 'antigravity', 'antigravity_cli', 'antigravity_ide', 'vscode', 'grok', 'qwen', 'copilot', 'openclaw', 'ironclaw', 'mistral', 'ollama', 'rtk', 'all'
+        'claude', 'codex', 'antigravity', 'antigravity_cli', 'antigravity_ide', 'vscode', 'grok', 'qwen', 'copilot', 'openclaw', 'ironclaw', 'freebuff', 'mistral', 'ollama', 'rtk', 'all'
     ) | ForEach-Object { Write-Host $_ }
 }
 
@@ -1760,7 +1762,7 @@ Usage:
 
 Commands:
   install-all              Install all supported CLIs (default)
-  install <target>         Install one target (claude/codex/antigravity/antigravity_cli/antigravity_ide/vscode/grok/qwen/copilot/openclaw/ironclaw/mistral/ollama/rtk/all)
+  install <target>         Install one target (claude/codex/antigravity/antigravity_cli/antigravity_ide/vscode/grok/qwen/copilot/openclaw/ironclaw/freebuff/mistral/ollama/rtk/all)
   setup-updater            Configure hidden auto-update Scheduled Task only
   list                     List supported targets
   help                     Show help (or use: Get-Help .\install_all_windows.ps1 -Detailed)
@@ -1784,6 +1786,7 @@ function Install-Target {
         'copilot'  { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'copilot' -NpmPath $npm }
         'openclaw' { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'openclaw' -NpmPath $npm }
         'ironclaw' { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'ironclaw' -NpmPath $npm }
+        'freebuff' { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'freebuff' -NpmPath $npm }
         'mistral' { Install-MistralVibe }
         'mistral-vibe' { Install-MistralVibe }
         'vibe'    { Install-MistralVibe }
@@ -1797,7 +1800,7 @@ function Install-Target {
 function Install-AllTargets {
     Install-ClaudeNativeCli
     $npm = Ensure-NodeAndNpm
-    foreach ($key in @('codex','grok','qwen','copilot','openclaw','ironclaw')) {
+    foreach ($key in @('codex','grok','qwen','copilot','openclaw','ironclaw','freebuff')) {
         Install-NpmCliTarget -Key $key -NpmPath $npm
     }
     Install-MistralVibe

@@ -615,7 +615,7 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("Get-Help .\\install_all_windows.ps1 -Detailed", script)
         self.assertIn("install-all", script)
         self.assertIn("install <target>", script)
-        self.assertIn("copilot/openclaw/ironclaw/mistral", script)
+        self.assertIn("copilot/openclaw/ironclaw/freebuff/mistral", script)
         self.assertIn("setup-updater", script)
         self.assertIn("--no-update-notifier", script)
         self.assertIn("--include=optional", script)
@@ -4713,6 +4713,224 @@ class AntigravityVSCodeInstallTests(unittest.TestCase):
         ):
             dirs = m.get_app_cli_bin_dirs(spec, lambda _m: None)
         self.assertIn(r"C:\Users\u\AppData\Local\agy\bin", dirs)
+
+
+class FreebuffTests(unittest.TestCase):
+    """Freebuff ships as an npm CLI plus a desktop app that has no winget,
+    Homebrew, or Flatpak listing and must be installed by direct download."""
+
+    def _app(self) -> m.GuiAppSpec:
+        return next(item for item in m.GUI_APP_SPECS if item.key == "freebuff_app")
+
+    def _cli(self) -> m.CliSpec:
+        return next(item for item in m.CLI_SPECS if item.key == "freebuff")
+
+    def test_cli_spec_is_npm_package(self) -> None:
+        spec = self._cli()
+        self.assertEqual(spec.package_candidates, ("freebuff",))
+        self.assertEqual(spec.command_candidates, ("freebuff",))
+        self.assertTrue(spec.optional)
+        # Not an app-installer CLI: it must go through the plain npm path.
+        self.assertFalse(m.cli_is_app_installer(spec))
+
+    def test_cli_is_in_macos_npm_update_list(self) -> None:
+        self.assertIn(m.FREEBUFF_NPM_PACKAGE, m.MACOS_NPM_UPDATE_PACKAGES)
+
+    def test_app_spec_has_no_package_manager_ids(self) -> None:
+        spec = self._app()
+        self.assertIsNone(spec.winget_id)
+        self.assertIsNone(spec.flatpak_id)
+        self.assertIsNone(spec.macos_brew_cask)
+        self.assertIsNone(spec.snap_name)
+        self.assertEqual(spec.direct_app_name, "Freebuff")
+
+    def test_app_download_urls_are_not_version_pinned(self) -> None:
+        spec = self._app()
+        for url in (
+            spec.windows_installer_url,
+            spec.macos_dmg_url,
+            spec.macos_dmg_url_intel,
+            spec.linux_appimage_url,
+        ):
+            self.assertIsNotNone(url)
+            assert url is not None
+            self.assertTrue(url.startswith("https://freebuff.com/api/desktop/download/"))
+
+    def test_direct_url_for_platform_windows(self) -> None:
+        spec = self._app()
+        with patch.object(m, "is_windows", return_value=True):
+            self.assertEqual(m._gui_app_direct_url_for_platform(spec), spec.windows_installer_url)
+
+    def test_direct_url_for_platform_macos_arm_and_intel(self) -> None:
+        spec = self._app()
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m.platform, "machine", return_value="arm64"),
+        ):
+            self.assertEqual(m._gui_app_direct_url_for_platform(spec), spec.macos_dmg_url)
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m.platform, "machine", return_value="x86_64"),
+        ):
+            self.assertEqual(m._gui_app_direct_url_for_platform(spec), spec.macos_dmg_url_intel)
+
+    def test_direct_url_for_platform_tolerates_partial_specs(self) -> None:
+        """Specs without the direct-download fields must not raise."""
+        spec = types.SimpleNamespace(key="x", label="X", windows_browser_url=None)
+        with patch.object(m, "is_windows", return_value=True):
+            self.assertIsNone(m._gui_app_direct_url_for_platform(spec))
+
+    def test_direct_install_paths_windows(self) -> None:
+        spec = self._app()
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.dict(m.os.environ, {"LOCALAPPDATA": r"C:\Users\u\AppData\Local"}),
+        ):
+            paths = m._gui_app_direct_install_paths(spec)
+        self.assertIn(r"C:\Users\u\AppData\Local\Programs\Freebuff\Freebuff.exe", paths)
+
+    def test_install_windows_runs_installer_silently(self) -> None:
+        spec = self._app()
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "is_macos", return_value=False),
+            patch.object(m, "is_linux", return_value=False),
+            patch.object(m, "_download_to_file", return_value=True),
+            patch.object(m, "run_command", return_value=0) as run_mock,
+        ):
+            self.assertTrue(m._install_gui_app_direct_download(spec, lambda _msg: None))
+        args = run_mock.call_args.args[0]
+        self.assertIn("/S", args)
+
+    def test_install_windows_reports_installer_failure(self) -> None:
+        spec = self._app()
+        logs: list[str] = []
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "is_macos", return_value=False),
+            patch.object(m, "is_linux", return_value=False),
+            patch.object(m, "_download_to_file", return_value=True),
+            patch.object(m, "run_command", return_value=1),
+        ):
+            self.assertFalse(m._install_gui_app_direct_download(spec, logs.append))
+        self.assertTrue(any("installer exited" in line for line in logs))
+
+    def test_install_returns_false_when_download_fails(self) -> None:
+        spec = self._app()
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "is_macos", return_value=False),
+            patch.object(m, "is_linux", return_value=False),
+            patch.object(m, "_download_to_file", return_value=False),
+            patch.object(m, "run_command", return_value=0) as run_mock,
+        ):
+            self.assertFalse(m._install_gui_app_direct_download(spec, lambda _msg: None))
+        run_mock.assert_not_called()
+
+    def test_install_gui_app_falls_through_to_direct_download(self) -> None:
+        spec = self._app()
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "_install_gui_app_direct_download", return_value=True) as direct_mock,
+            patch.object(m, "_install_gui_app_browser_shortcut", return_value=False) as browser_mock,
+        ):
+            self.assertTrue(m.install_gui_app(spec, lambda _msg: None))
+        direct_mock.assert_called_once()
+        browser_mock.assert_not_called()
+
+    def test_uninstall_windows_runs_uninstaller(self) -> None:
+        spec = self._app()
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(
+                m,
+                "_gui_app_direct_install_paths",
+                return_value=[r"C:\Users\u\AppData\Local\Programs\Freebuff\Freebuff.exe"],
+            ),
+            patch.object(m.os.path, "isfile", return_value=True),
+            patch.object(m, "run_command", return_value=0) as run_mock,
+        ):
+            self.assertTrue(m._uninstall_gui_app_direct_download(spec, lambda _msg: None))
+        args = run_mock.call_args.args[0]
+        self.assertTrue(args[0].endswith("Uninstall Freebuff.exe"))
+        self.assertIn("/S", args)
+
+    def test_is_gui_app_installed_detects_direct_install(self) -> None:
+        spec = self._app()
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "is_macos", return_value=False),
+            patch.object(m, "is_linux", return_value=False),
+            patch.object(m, "_gui_app_direct_installed", return_value=True),
+            patch.object(m, "_gui_app_browser_shortcut_paths", return_value=[]),
+        ):
+            self.assertTrue(m.is_gui_app_installed(spec))
+
+    def test_download_falls_back_to_urllib_when_curl_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "out.bin")
+
+            class FakeResponse:
+                def read(self, *_args: object) -> bytes:
+                    return b""
+
+                def __enter__(self) -> "FakeResponse":
+                    return self
+
+                def __exit__(self, *_args: object) -> None:
+                    return None
+
+            def fake_copyfileobj(_src: object, dst: object) -> None:
+                dst.write(b"payload")  # type: ignore[attr-defined]
+
+            with (
+                patch.object(m, "command_exists", return_value=False),
+                patch.object(m.urllib.request, "urlopen", return_value=FakeResponse()),
+                patch.object(m.shutil, "copyfileobj", side_effect=fake_copyfileobj),
+            ):
+                self.assertTrue(m._download_to_file("https://example.com/x", dest, "X", lambda _msg: None))
+            with open(dest, "rb") as handle:
+                self.assertEqual(handle.read(), b"payload")
+
+    def test_download_returns_false_on_network_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "out.bin")
+            logs: list[str] = []
+            with (
+                patch.object(m, "command_exists", return_value=False),
+                patch.object(m.urllib.request, "urlopen", side_effect=OSError("no route")),
+            ):
+                self.assertFalse(m._download_to_file("https://example.com/x", dest, "X", logs.append))
+            self.assertTrue(any("Could not download" in line for line in logs))
+
+
+class FreebuffScriptContentTests(unittest.TestCase):
+    """The one-click scripts are shipped as release assets, so freebuff has to
+    be wired into each of them, not just the GUI."""
+
+    def _read(self, name: str) -> str:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_windows_script_installs_and_updates_freebuff(self) -> None:
+        script = self._read("install_all_windows.ps1")
+        self.assertIn("freebuff = @{ Label = 'Freebuff CLI'; Packages = @('freebuff') }", script)
+        self.assertIn('Update-NpmCli @("freebuff")', script)
+        self.assertIn("'openclaw','ironclaw','freebuff'", script)
+
+    def test_linux_script_installs_and_updates_freebuff(self) -> None:
+        script = self._read("install_all_linux.sh")
+        self.assertIn('install_npm_cli "Freebuff CLI" "freebuff"', script)
+        self.assertIn('update_npm_cli "Freebuff CLI" "freebuff"', script)
+        self.assertIn("codex|grok|qwen|copilot|openclaw|ironclaw|freebuff", script)
+
+    def test_macos_script_installs_and_updates_freebuff(self) -> None:
+        script = self._read("install_all_macos.sh")
+        self.assertIn('install_npm_cli "Freebuff CLI" 16 "freebuff"', script)
+        self.assertIn('update_npm_package "freebuff"', script)
 
 
 if __name__ == "__main__":  # pragma: no cover

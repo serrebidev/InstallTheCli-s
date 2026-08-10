@@ -67,7 +67,7 @@ This script installs:
   - Node.js + npm (distro package manager)
   - Claude CLI (Anthropic's official native installer, claude.ai/install.sh)
   - Codex CLI, Grok CLI, Qwen CLI, GitHub Copilot CLI,
-    OpenClaw CLI, IronClaw CLI (npm)
+    OpenClaw CLI, IronClaw CLI, Freebuff CLI (npm)
   - Mistral Vibe CLI (Python 3.12+ + pip/uv)
   - Ollama (official install script)
   - Antigravity (official tar.gz from antigravity.google) and Visual Studio Code
@@ -91,6 +91,7 @@ Supported targets:
   copilot
   openclaw
   ironclaw
+  freebuff
   mistral
   ollama
   rtk
@@ -381,6 +382,7 @@ install_all_npm_clis() {
   install_npm_cli "GitHub Copilot CLI" "@github/copilot" "@githubnext/github-copilot-cli"
   install_npm_cli "OpenClaw CLI" "openclaw"
   install_npm_cli "IronClaw CLI" "ironclaw"
+  install_npm_cli "Freebuff CLI" "freebuff"
 }
 
 install_npm_target() {
@@ -392,6 +394,7 @@ install_npm_target() {
     copilot) install_npm_cli "GitHub Copilot CLI" "@github/copilot" "@githubnext/github-copilot-cli" ;;
     openclaw) install_npm_cli "OpenClaw CLI" "openclaw" ;;
     ironclaw) install_npm_cli "IronClaw CLI" "ironclaw" ;;
+    freebuff) install_npm_cli "Freebuff CLI" "freebuff" ;;
     *)
       return 1
       ;;
@@ -710,7 +713,7 @@ install_single_target() {
     claude)
       install_claude_native
       ;;
-    codex|grok|qwen|copilot|openclaw|ironclaw)
+    codex|grok|qwen|copilot|openclaw|ironclaw|freebuff)
       install_npm_target "$target_key"
       ;;
     *)
@@ -808,6 +811,7 @@ update_npm_all() {
   update_npm_cli "GitHub Copilot CLI" "@github/copilot" "@githubnext/github-copilot-cli"
   update_npm_cli "OpenClaw CLI" "openclaw"
   update_npm_cli "IronClaw CLI" "ironclaw"
+  update_npm_cli "Freebuff CLI" "freebuff"
 }
 
 select_python() {
@@ -1035,7 +1039,7 @@ parse_args() {
     help)
       SUBCOMMAND="help"
       ;;
-    claude|codex|antigravity|antigravity_cli|antigravity_ide|agy|vscode|code|grok|qwen|copilot|openclaw|ironclaw|mistral|mistral-vibe|vibe|ollama|rtk|all)
+    claude|codex|antigravity|antigravity_cli|antigravity_ide|agy|vscode|code|grok|qwen|copilot|openclaw|ironclaw|freebuff|mistral|mistral-vibe|vibe|ollama|rtk|all)
       # Convenience alias: treat first positional target as "install <target>"
       SUBCOMMAND="install"
       TARGET="${positional[0],,}"
@@ -1105,7 +1109,7 @@ main() {
   if [[ "$SUBCOMMAND" == "setup-cron" ]]; then
     log "Cron updater is configured."
   else
-    log "Open a new shell and run: claude, codex, antigravity, code, grok, qwen, copilot, openclaw, ironclaw, vibe, ollama"
+    log "Open a new shell and run: claude, codex, antigravity, code, grok, qwen, copilot, openclaw, ironclaw, freebuff, vibe, ollama"
   fi
 }
 

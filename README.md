@@ -8,8 +8,8 @@ A vibe-coded installer for Windows, macOS, and Linux that sets up all the popula
 
 ## Features
 
-- Installs the popular AI CLIs: Claude, Codex, Antigravity 2.0, Antigravity CLI (`agy`), Antigravity IDE, Visual Studio Code, Grok, Qwen, GitHub Copilot, OpenClaw, IronClaw, Mistral Vibe, Ollama, and RTK (Rust Token Killer, built from `rtk-ai/rtk` git master via cargo).
-- Installs desktop AI apps from the GUI: Claude, ChatGPT (the new app with Chat, ChatGPT Work, and Codex), Gemini, Microsoft Copilot, and Perplexity.
+- Installs the popular AI CLIs: Claude, Codex, Antigravity 2.0, Antigravity CLI (`agy`), Antigravity IDE, Visual Studio Code, Grok, Qwen, GitHub Copilot, OpenClaw, IronClaw, Freebuff, Mistral Vibe, Ollama, and RTK (Rust Token Killer, built from `rtk-ai/rtk` git master via cargo).
+- Installs desktop AI apps from the GUI: Claude, ChatGPT (the new app with Chat, ChatGPT Work, and Codex), Freebuff, Gemini, Microsoft Copilot, and Perplexity.
 - Works three ways: a GUI app, a one-click PowerShell script on Windows, and one-click Bash scripts on macOS and Linux (Debian, Ubuntu, Fedora, Arch).
 - Installs prerequisites for you when missing: Node.js/npm, Python 3.14 (Windows), pip/uv, and Homebrew on macOS (it asks first).
 - Adds CLI directories to PATH and creates desktop shortcuts.
@@ -89,6 +89,7 @@ qwen
 copilot
 openclaw
 ironclaw
+freebuff
 vibe
 ollama
 rtk

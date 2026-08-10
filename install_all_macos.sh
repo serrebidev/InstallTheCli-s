@@ -55,7 +55,7 @@ This script installs:
   - Homebrew if missing and you approve it
   - Claude CLI, Codex CLI, Antigravity, Visual Studio Code, Qwen CLI,
     GitHub Copilot CLI, Mistral Vibe CLI, Ollama CLI, IronClaw CLI (Homebrew)
-  - Grok CLI (npm, with Node.js installed by Homebrew if needed)
+  - Grok CLI, Freebuff CLI (npm, with Node.js installed by Homebrew if needed)
   - OpenClaw CLI (official installer, with Node.js 22.14+ installed by Homebrew if needed)
   - RTK (Rust Token Killer) from git master via cargo (opt-in: 'install rtk')
   - launchd updater (RunAtLoad and daily) unless --no-launch-agent is used
@@ -76,6 +76,7 @@ Supported targets:
   copilot
   openclaw
   ironclaw
+  freebuff
   mistral
   ollama
   rtk
@@ -283,6 +284,7 @@ install_all_targets() {
   brew_install_cask copilot-cli
   install_openclaw_official
   brew_install_formula ironclaw
+  install_npm_cli "Freebuff CLI" 16 "freebuff"
   brew_install_formula mistral-vibe
   brew_install_formula ollama
 }
@@ -409,6 +411,7 @@ install_single_target() {
     copilot) brew_install_cask copilot-cli ;;
     openclaw) install_openclaw_official ;;
     ironclaw) brew_install_formula ironclaw ;;
+    freebuff) install_npm_cli "Freebuff CLI" 16 "freebuff" ;;
     mistral|mistral-vibe|vibe) brew_install_formula mistral-vibe ;;
     ollama) brew_install_formula ollama ;;
     rtk) install_rtk ;;
@@ -485,6 +488,7 @@ fi
 
 update_npm_package "@vibe-kit/grok-cli"
 update_npm_package "openclaw"
+update_npm_package "freebuff"
 
 rtk_has_any_command() {
   local name
@@ -627,7 +631,7 @@ parse_args() {
     help)
       SUBCOMMAND="help"
       ;;
-    claude|codex|antigravity|antigravity_cli|antigravity_ide|agy|vscode|code|grok|qwen|copilot|openclaw|ironclaw|mistral|mistral-vibe|vibe|ollama|rtk|all)
+    claude|codex|antigravity|antigravity_cli|antigravity_ide|agy|vscode|code|grok|qwen|copilot|openclaw|ironclaw|freebuff|mistral|mistral-vibe|vibe|ollama|rtk|all)
       SUBCOMMAND="install"
       TARGET="$command_name"
       ;;
@@ -687,7 +691,7 @@ main() {
   if [[ "$SUBCOMMAND" == "setup-launch-agent" ]]; then
     log "launchd updater is configured."
   else
-    log "Open a new shell and run: claude, codex, antigravity, code, grok, qwen, copilot, openclaw, ironclaw, vibe, ollama"
+    log "Open a new shell and run: claude, codex, antigravity, code, grok, qwen, copilot, openclaw, ironclaw, freebuff, vibe, ollama"
   fi
 }
 

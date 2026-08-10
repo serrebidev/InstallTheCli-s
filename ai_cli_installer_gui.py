@@ -3,6 +3,7 @@ import glob
 import html
 import json
 import os
+import platform
 import posixpath
 import re
 import shlex
@@ -14,6 +15,7 @@ import tempfile
 import threading
 import time
 import traceback
+import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -85,6 +87,16 @@ CLAUDE_INSTALL_PS1 = "https://claude.ai/install.ps1"
 CLAUDE_INSTALL_SH = "https://claude.ai/install.sh"
 GROK_NPM_PACKAGE = "@vibe-kit/grok-cli"
 OPENCLAW_NPM_PACKAGE = "openclaw"
+FREEBUFF_NPM_PACKAGE = "freebuff"
+# Freebuff Desktop has no winget/Homebrew/Flatpak listing. freebuff.com serves
+# version-agnostic redirect endpoints that land on the current GitHub release
+# asset, so these URLs stay correct across releases and must not be pinned to a
+# version. Windows = electron-builder NSIS .exe, macOS = .dmg, Linux = AppImage.
+FREEBUFF_DESKTOP_WINDOWS_URL = "https://freebuff.com/api/desktop/download/windows"
+FREEBUFF_DESKTOP_MACOS_ARM_URL = "https://freebuff.com/api/desktop/download/mac-arm64"
+FREEBUFF_DESKTOP_MACOS_INTEL_URL = "https://freebuff.com/api/desktop/download/mac-intel"
+FREEBUFF_DESKTOP_LINUX_URL = "https://freebuff.com/api/desktop/download/linux"
+FREEBUFF_DESKTOP_APP_NAME = "Freebuff"
 GUI_LAST_RUN_LOG_FILE = "gui_last_run.log"
 NPM_INSTALL_MAX_ATTEMPTS = 3
 NPM_INSTALL_RETRY_DELAY_SECONDS = 2.0
@@ -92,7 +104,7 @@ NPM_QUIET_FLAGS = ["--no-fund", "--no-audit", "--no-update-notifier", "--logleve
 PIP_QUIET_FLAGS = ["--disable-pip-version-check", "--no-input", "--quiet"]
 MACOS_BREW_FORMULA_CLIS = ("qwen-code", "mistral-vibe", "ollama", "ironclaw")
 MACOS_BREW_CASK_CLIS = ("claude-code", "codex", "copilot-cli", "antigravity", "visual-studio-code", "antigravity-ide")
-MACOS_NPM_UPDATE_PACKAGES = (GROK_NPM_PACKAGE, OPENCLAW_NPM_PACKAGE)
+MACOS_NPM_UPDATE_PACKAGES = (GROK_NPM_PACKAGE, OPENCLAW_NPM_PACKAGE, FREEBUFF_NPM_PACKAGE)
 RTK_OPTIONAL_INTEGRATIONS = (
     ("GitHub Copilot CLI", ("copilot", "github-copilot-cli", "github-copilot"), ("--copilot",)),
     ("OpenCode", ("opencode",), ("--opencode",)),
@@ -153,6 +165,15 @@ class GuiAppSpec:
     windows_browser_url: Optional[str] = None
     linux_browser_url: Optional[str] = None
     macos_browser_url: Optional[str] = None
+    # Direct-download installs, for apps with no winget/brew/Flatpak listing
+    # (Freebuff Desktop). Windows expects an electron-builder NSIS .exe (silent
+    # `/S`), macOS a .dmg, Linux an AppImage. `direct_app_name` is the product
+    # name used for the installed .app / AppImage / Programs subdirectory.
+    windows_installer_url: Optional[str] = None
+    macos_dmg_url: Optional[str] = None
+    macos_dmg_url_intel: Optional[str] = None
+    linux_appimage_url: Optional[str] = None
+    direct_app_name: Optional[str] = None
     optional: bool = False
 
 
@@ -302,6 +323,17 @@ CLI_SPECS: tuple[CliSpec, ...] = (
         optional=True,
     ),
     CliSpec(
+        key="freebuff",
+        label="Freebuff CLI",
+        help_text="Installs Freebuff, the free coding agent CLI, from npm (Node 16+ required).",
+        package_candidates=(FREEBUFF_NPM_PACKAGE,),
+        command_candidates=("freebuff",),
+        shortcut_name="Freebuff CLI",
+        macos_requires_node_major=16,
+        macos_requires_node_version=(16, 0, 0),
+        optional=True,
+    ),
+    CliSpec(
         key="rtk",
         label="RTK (Rust Token Killer)",
         help_text="Installs rtk-ai/rtk from git master via cargo (Rust toolchain installed automatically if missing).",
@@ -341,6 +373,21 @@ GUI_APP_SPECS: tuple[GuiAppSpec, ...] = (
         linux_browser_url="https://chat.openai.com",
         macos_brew_cask="chatgpt",
         macos_browser_url="https://chatgpt.com",
+    ),
+    GuiAppSpec(
+        key="freebuff_app",
+        label="Freebuff App (Desktop)",
+        help_text=(
+            "Installs the Freebuff Desktop coding agent from freebuff.com "
+            "(Windows: signed .exe installer; macOS: .dmg; Linux: AppImage). "
+            "There is no winget, Homebrew, or Flatpak listing for it."
+        ),
+        windows_installer_url=FREEBUFF_DESKTOP_WINDOWS_URL,
+        macos_dmg_url=FREEBUFF_DESKTOP_MACOS_ARM_URL,
+        macos_dmg_url_intel=FREEBUFF_DESKTOP_MACOS_INTEL_URL,
+        linux_appimage_url=FREEBUFF_DESKTOP_LINUX_URL,
+        direct_app_name=FREEBUFF_DESKTOP_APP_NAME,
+        optional=True,
     ),
     GuiAppSpec(
         key="gemini_app",
@@ -4093,6 +4140,49 @@ def _brew_cask_app_installed(cask_name: str) -> bool:
     return brew_package_installed(brew, cask_name, cask=True)
 
 
+def _gui_app_direct_url_for_platform(spec: GuiAppSpec) -> Optional[str]:
+    """The direct-download installer URL for the running platform, if the spec
+    has one. macOS picks the Intel build on x86_64 when a separate one exists."""
+    # getattr keeps this working for the lightweight spec stand-ins used in
+    # tests, which only define the fields a given case exercises.
+    if is_windows():
+        return getattr(spec, "windows_installer_url", None)
+    if is_macos():
+        intel = getattr(spec, "macos_dmg_url_intel", None)
+        if platform.machine().lower() in ("x86_64", "amd64") and intel:
+            return intel
+        return getattr(spec, "macos_dmg_url", None)
+    if is_linux():
+        return getattr(spec, "linux_appimage_url", None)
+    return None
+
+
+def _gui_app_direct_install_paths(spec: GuiAppSpec) -> list[str]:
+    """Where a direct-download install of this app lands, per platform."""
+    name = getattr(spec, "direct_app_name", None)
+    if not name:
+        return []
+    home = os.path.expanduser("~")
+    if is_windows():
+        local = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+        return [
+            os.path.join(local, "Programs", name, f"{name}.exe"),
+            os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), name, f"{name}.exe"),
+        ]
+    if is_macos():
+        return [
+            os.path.join("/Applications", f"{name}.app"),
+            os.path.join(home, "Applications", f"{name}.app"),
+        ]
+    if is_linux():
+        return [os.path.join(_linux_user_bin_dir(), f"{name}.AppImage")]
+    return []
+
+
+def _gui_app_direct_installed(spec: GuiAppSpec) -> bool:
+    return any(os.path.exists(p) for p in _gui_app_direct_install_paths(spec))
+
+
 def is_gui_app_installed(spec: GuiAppSpec) -> bool:
     if is_windows():
         if spec.winget_id and _winget_app_installed(spec.winget_id, spec.winget_source):
@@ -4105,10 +4195,178 @@ def is_gui_app_installed(spec: GuiAppSpec) -> bool:
             return True
         if spec.snap_name and _snap_app_installed(spec.snap_name):
             return True
+    if _gui_app_direct_url_for_platform(spec) and _gui_app_direct_installed(spec):
+        return True
     for path in _gui_app_browser_shortcut_paths(spec):
         if os.path.isfile(path):
             return True
     return False
+
+
+def _download_to_file(url: str, dest: str, label: str, log: Callable[[str], None]) -> bool:
+    """Download url to dest. Prefers curl (present on Windows 10+, macOS, and
+    most Linux images) for consistent logging, and falls back to urllib so a
+    missing curl is not fatal."""
+    log(f"Downloading {label} from {url}")
+    if command_exists("curl"):
+        code = run_command(["curl", "-fsSL", "--retry", "2", "-o", dest, url], log)
+        if code == 0 and os.path.isfile(dest) and os.path.getsize(dest) > 0:
+            return True
+        log(f"curl download failed with exit code {format_exit_code(code)}; retrying with urllib.")
+    try:
+        with urllib.request.urlopen(url) as response, open(dest, "wb") as handle:
+            shutil.copyfileobj(response, handle)
+    except Exception as exc:  # noqa: BLE001 - any network/IO failure is a download failure
+        log(f"Could not download {label}: {exc}")
+        return False
+    return os.path.isfile(dest) and os.path.getsize(dest) > 0
+
+
+def _install_gui_app_direct_windows(spec: GuiAppSpec, url: str, tmpdir: str, log: Callable[[str], None]) -> bool:
+    installer = os.path.join(tmpdir, f"{spec.key}-setup.exe")
+    if not _download_to_file(url, installer, spec.label, log):
+        return False
+    # electron-builder's NSIS installer takes /S for silent; the extra flags keep
+    # it per-user so the install needs no elevation.
+    code = run_command([installer, "/S", "/allusers=0"], log)
+    if code != 0:
+        log(f"{spec.label}: installer exited with code {format_exit_code(code)}.")
+        return False
+    log(f"Installed {spec.label}.")
+    return True
+
+
+def _install_gui_app_direct_macos(spec: GuiAppSpec, url: str, tmpdir: str, log: Callable[[str], None]) -> bool:
+    name = getattr(spec, "direct_app_name", None) or spec.label
+    dmg = os.path.join(tmpdir, f"{spec.key}.dmg")
+    if not _download_to_file(url, dmg, spec.label, log):
+        return False
+    mount = os.path.join(tmpdir, "mnt")
+    os.makedirs(mount, exist_ok=True)
+    code = run_command(["hdiutil", "attach", dmg, "-nobrowse", "-quiet", "-mountpoint", mount], log)
+    if code != 0:
+        log(f"{spec.label}: could not mount the .dmg (exit {format_exit_code(code)}).")
+        return False
+    try:
+        apps = [e for e in os.listdir(mount) if e.endswith(".app")]
+        if not apps:
+            log(f"{spec.label}: the .dmg did not contain an .app bundle.")
+            return False
+        source = os.path.join(mount, apps[0])
+        target = os.path.join("/Applications", f"{name}.app")
+        run_command(["rm", "-rf", target], log)
+        code = run_command(["cp", "-R", source, target], log)
+        if code != 0:
+            log(f"{spec.label}: could not copy into /Applications (exit {format_exit_code(code)}).")
+            return False
+        # Gatekeeper flags anything downloaded outside the App Store; clearing the
+        # quarantine bit keeps the first launch from being blocked outright.
+        run_command(["xattr", "-dr", "com.apple.quarantine", target], log)
+        log(f"Installed {spec.label} to {target}.")
+        return True
+    finally:
+        run_command(["hdiutil", "detach", mount, "-quiet"], log)
+
+
+def _install_gui_app_direct_linux(spec: GuiAppSpec, url: str, tmpdir: str, log: Callable[[str], None]) -> bool:
+    name = getattr(spec, "direct_app_name", None) or spec.label
+    staged = os.path.join(tmpdir, f"{name}.AppImage")
+    if not _download_to_file(url, staged, spec.label, log):
+        return False
+    bin_dir = _linux_user_bin_dir()
+    os.makedirs(bin_dir, exist_ok=True)
+    target = os.path.join(bin_dir, f"{name}.AppImage")
+    try:
+        shutil.move(staged, target)
+        os.chmod(target, os.stat(target).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    except OSError as exc:
+        log(f"{spec.label}: could not install the AppImage into {bin_dir}: {exc}")
+        return False
+    desktop_path = os.path.join(
+        os.path.expanduser("~"), ".local", "share", "applications", f"installcli-{spec.key}.desktop"
+    )
+    os.makedirs(os.path.dirname(desktop_path), exist_ok=True)
+    write_text_file(
+        desktop_path,
+        "\n".join(
+            [
+                "[Desktop Entry]",
+                "Type=Application",
+                f"Name={spec.label}",
+                f"Exec={target} %U",
+                "Terminal=false",
+                "Categories=Development;",
+            ]
+        )
+        + "\n",
+    )
+    log(f"Installed {spec.label} to {target}.")
+    return True
+
+
+def _install_gui_app_direct_download(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
+    """Install an app that ships only as a direct download (Freebuff Desktop)."""
+    url = _gui_app_direct_url_for_platform(spec)
+    if not url:
+        return False
+    tmpdir = tempfile.mkdtemp(prefix="installthecli-")
+    try:
+        if is_windows():
+            return _install_gui_app_direct_windows(spec, url, tmpdir, log)
+        if is_macos():
+            return _install_gui_app_direct_macos(spec, url, tmpdir, log)
+        if is_linux():
+            return _install_gui_app_direct_linux(spec, url, tmpdir, log)
+        return False
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _uninstall_gui_app_direct_download(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
+    """Remove a direct-download install. On Windows this runs the uninstaller
+    electron-builder writes next to the app; elsewhere the app is a single
+    bundle/AppImage that can just be deleted."""
+    name = getattr(spec, "direct_app_name", None) or spec.label
+    removed = False
+    if is_windows():
+        for exe_path in _gui_app_direct_install_paths(spec):
+            app_dir = os.path.dirname(exe_path)
+            uninstaller = os.path.join(app_dir, f"Uninstall {name}.exe")
+            if os.path.isfile(uninstaller):
+                code = run_command([uninstaller, "/S", "/allusers=0"], log)
+                if code == 0:
+                    removed = True
+                else:
+                    log(f"{spec.label}: uninstaller exited with code {format_exit_code(code)}.")
+        if removed:
+            log(f"Uninstalled {spec.label}.")
+        return removed
+
+    for path in _gui_app_direct_install_paths(spec):
+        if not os.path.exists(path):
+            continue
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.remove(path)
+            removed = True
+        except OSError as exc:
+            log(f"{spec.label}: could not remove {path}: {exc}")
+
+    if is_linux():
+        desktop_path = os.path.join(
+            os.path.expanduser("~"), ".local", "share", "applications", f"installcli-{spec.key}.desktop"
+        )
+        if os.path.isfile(desktop_path):
+            try:
+                os.remove(desktop_path)
+            except OSError:
+                pass
+
+    if removed:
+        log(f"Uninstalled {spec.label}.")
+    return removed
 
 
 def _install_gui_app_browser_shortcut(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
@@ -4257,12 +4515,16 @@ def install_gui_app(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
     if is_windows():
         if spec.winget_id and _install_gui_app_winget(spec, log):
             return True
+        if _install_gui_app_direct_download(spec, log):
+            return True
         if _install_gui_app_browser_shortcut(spec, log):
             return True
         log(f"{spec.label}: No Windows install method available. Please install it manually from the app's website.")
         return False
     if is_macos():
         if spec.macos_brew_cask and _install_gui_app_brew_cask(spec, log):
+            return True
+        if _install_gui_app_direct_download(spec, log):
             return True
         if _install_gui_app_browser_shortcut(spec, log):
             return True
@@ -4272,6 +4534,8 @@ def install_gui_app(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
         if spec.flatpak_id and _install_gui_app_flatpak(spec, log):
             return True
         if spec.snap_name and _install_gui_app_snap(spec, log):
+            return True
+        if _install_gui_app_direct_download(spec, log):
             return True
         if _install_gui_app_browser_shortcut(spec, log):
             return True
@@ -4287,6 +4551,9 @@ def uninstall_gui_app(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
         if spec.winget_id:
             attempted = True
             _uninstall_gui_app_winget(spec, log)
+        if _gui_app_direct_url_for_platform(spec):
+            attempted = True
+            _uninstall_gui_app_direct_download(spec, log)
         if _gui_app_browser_url_for_platform(spec):
             attempted = True
             _uninstall_gui_app_browser_shortcut(spec, log)
@@ -4294,6 +4561,9 @@ def uninstall_gui_app(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
         if spec.macos_brew_cask:
             attempted = True
             _uninstall_gui_app_brew_cask(spec, log)
+        if _gui_app_direct_url_for_platform(spec):
+            attempted = True
+            _uninstall_gui_app_direct_download(spec, log)
         if _gui_app_browser_url_for_platform(spec):
             attempted = True
             _uninstall_gui_app_browser_shortcut(spec, log)
@@ -4304,6 +4574,9 @@ def uninstall_gui_app(spec: GuiAppSpec, log: Callable[[str], None]) -> bool:
         if spec.snap_name:
             attempted = True
             _uninstall_gui_app_snap(spec, log)
+        if _gui_app_direct_url_for_platform(spec):
+            attempted = True
+            _uninstall_gui_app_direct_download(spec, log)
         if _gui_app_browser_url_for_platform(spec):
             attempted = True
             _uninstall_gui_app_browser_shortcut(spec, log)
