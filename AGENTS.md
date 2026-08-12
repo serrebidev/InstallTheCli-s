@@ -96,6 +96,7 @@ CLI specs (`CLI_SPECS` in `ai_cli_installer_gui.py`):
 - GitHub Copilot CLI (`@github/copilot`, npm; macOS cask `copilot-cli`)
 - OpenClaw CLI (npm; macOS official installer, Node 22.14+; optional)
 - IronClaw CLI (macOS formula; npm fallback elsewhere; optional)
+- Freebuff CLI (`freebuff`, npm; Node 16+; optional)
 - RTK (Rust Token Killer; cargo install from `rtk-ai/rtk` git master; optional)
 
 Desktop app specs (`GUI_APP_SPECS`, GUI only):
@@ -104,7 +105,19 @@ Desktop app specs (`GUI_APP_SPECS`, GUI only):
   Microsoft Store Product ID `9PLM9XGG6VKS` via winget `msstore` source; cask
   `chatgpt`; Linux browser shortcut). This REPLACED the separate Codex App spec;
   do not resurrect `codex_app` or the old `OpenAI.ChatGPT` winget id.
+- Freebuff App (direct download from freebuff.com; no winget/brew/Flatpak —
+  Windows electron-builder NSIS `.exe` (silent `/S`), macOS `.dmg` mounted +
+  copied into `/Applications`, Linux `.AppImage` with `.desktop` entry; optional)
 - Gemini App, Microsoft Copilot App, Perplexity App (winget/Flatpak/shortcut; optional)
+
+Direct-download apps (Freebuff Desktop) use `GuiAppSpec` fields:
+`windows_installer_url`, `macos_dmg_url`, `macos_dmg_url_intel`,
+`linux_appimage_url`, and `direct_app_name`. Install detection checks known
+install paths (`_gui_app_direct_install_paths`), install runs through
+`_install_gui_app_direct_download` → per-platform helpers, and uninstall runs
+the electron-builder uninstaller on Windows or deletes the bundle on macOS/Linux.
+These apps have no auto-update story beyond what the app itself ships — the
+installer only handles the initial fetch and placement.
 
 IDE-style CLIs (Antigravity, VS Code) are not npm packages. They are `CliSpec`s
 where `cli_is_app_installer(spec)` is true (`winget_id` or `linux_install_kind`
@@ -128,6 +141,8 @@ set) and go through `ensure_app_cli` / `uninstall_app_cli`:
   `InstallTheCli - Update AI CLIs`.
   - Triggers: startup, logon, daily (3:00AM default). No visible window — it
     launches through `wscript.exe` + a `.vbs` wrapper so PowerShell stays hidden.
+    The wrapper waits and returns PowerShell's exit code so Task Scheduler records
+    the updater's real result instead of an early success.
   - Codex updates close running Codex processes before npm touches `codex.exe`;
     stale npm `.codex-*` temp directories are cleaned when possible.
   - Claude updates are skipped while `claude.exe` is running. `Update-ClaudeNative`
@@ -177,6 +192,10 @@ set) and go through `ensure_app_cli` / `uninstall_app_cli`:
    - The Claude native self-heal above (skip-while-running, `claude update`,
      reinstall via install.ps1/install.sh on breakage, legacy npm migration).
    - Windows Scheduled Task registration warning handling.
+   - Windows native-Claude command bridge: `%APPDATA%\npm\claude.cmd` forwards
+     to `%USERPROFILE%\.local\bin\claude.exe`. Keep it managed by terminal
+     compatibility repair and the updater so terminals with a pre-migration PATH
+     keep working after the legacy npm shims are removed.
    - Linux distro detection / package manager branching.
    - Windows rtk Claude hook: `Install-RtkBashShim` drops an `rtk` shim into
      Git's `usr\bin` so the bare `rtk hook claude` command resolves from Claude

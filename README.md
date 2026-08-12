@@ -1,6 +1,6 @@
 # InstallTheCli
 
-A vibe-coded installer for Windows, macOS, and Linux that sets up all the popular AI CLIs and desktop AI apps in one go, then keeps them updated in the background — so you never have to do it manually.
+A vibe-coded, set-it-and-forget-it installer for Windows, macOS, and Linux that puts every popular AI CLI and desktop AI app on your machine in one shot and keeps them current in the background — hands-free, no popups, no manual `npm update` ever again.
 
 [![Join SerrebiProjects on Telegram](https://img.shields.io/badge/Telegram-SerrebiProjects-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/SerrebiProjects)
 
@@ -8,14 +8,14 @@ A vibe-coded installer for Windows, macOS, and Linux that sets up all the popula
 
 ## Features
 
-- Installs the popular AI CLIs: Claude, Codex, Antigravity 2.0, Antigravity CLI (`agy`), Antigravity IDE, Visual Studio Code, Grok, Qwen, GitHub Copilot, OpenClaw, IronClaw, Freebuff, Mistral Vibe, Ollama, and RTK (Rust Token Killer, built from `rtk-ai/rtk` git master via cargo).
-- Installs desktop AI apps from the GUI: Claude, ChatGPT (the new app with Chat, ChatGPT Work, and Codex), Freebuff, Gemini, Microsoft Copilot, and Perplexity.
-- Works three ways: a GUI app, a one-click PowerShell script on Windows, and one-click Bash scripts on macOS and Linux (Debian, Ubuntu, Fedora, Arch).
-- Installs prerequisites for you when missing: Node.js/npm, Python 3.14 (Windows), pip/uv, and Homebrew on macOS (it asks first).
-- Adds CLI directories to PATH and creates desktop shortcuts.
-- Sets up silent background auto-updates: a hidden Scheduled Task on Windows (startup, logon, and daily — no popup windows), a LaunchAgent on macOS, and cron on Linux.
-- Repairs broken installs automatically — for example a missing or broken Claude CLI is reinstalled from Anthropic's official installer on the next updater run, and old npm-based Claude installs are migrated to the native install.
-- Uses official sources: winget, Homebrew, npm, Microsoft Store, and vendor installer scripts (Claude installs via Anthropic's official native installer from claude.ai).
+- Installs fifteen AI CLIs: Claude, Codex, Antigravity 2.0, Antigravity CLI (`agy`), Antigravity IDE, Visual Studio Code, Grok, Qwen, GitHub Copilot, OpenClaw, IronClaw, Freebuff, Mistral Vibe, Ollama, and RTK (Rust Token Killer, built from `rtk-ai/rtk` git master via cargo).
+- Installs six desktop AI apps from the GUI: Claude, ChatGPT (the new app with Chat, ChatGPT Work, and Codex), Freebuff, Gemini, Microsoft Copilot, and Perplexity.
+- Works three ways so you can pick what fits: a point-and-click GUI, a one-click PowerShell script on Windows, and one-click Bash scripts on macOS and Linux.
+- Installs every missing prerequisite without making you chase them: Node.js and npm, Python 3.14 (Windows), pip or uv, and Homebrew on macOS — it asks before touching Homebrew, because that's not my call.
+- Adds CLI directories to your PATH and drops desktop shortcuts where you expect them.
+- Sets up silent background auto-updates: a hidden Scheduled Task on Windows (startup, logon, and daily — no visible windows, ever), a LaunchAgent on macOS, and cron on Linux. You install once and they just stay current.
+- Heals broken installs on its own — a missing or busted Claude CLI gets reinstalled from Anthropic's official installer on the next updater run, and old npm-based Claude installs are quietly migrated to the native one so they don't shadow each other.
+- Pulls from official sources only: winget, Homebrew, npm, the Microsoft Store, and vendor installer scripts. Claude comes from Anthropic's own native installer at claude.ai. Freebuff Desktop is a direct download from freebuff.com — it's not on any package manager yet, but the installer fetches it, mounts the DMG, clears the quarantine bit, and drops the .app where it belongs, without winget or Homebrew in the middle.
 
 ## Download and install
 
@@ -74,9 +74,9 @@ Once set up, updates run silently in the background:
 - macOS: LaunchAgent `com.installthecli.ai-cli-updates` (login and daily). Updates Homebrew formulae/casks and globally installed npm CLIs.
 - Linux: cron (`@reboot` and daily). Log at `/var/log/installthecli-linux-update.log`.
 
-## Quick sanity check after install
+## Quick sanity check
 
-Open a new shell and try the commands you installed:
+Open a new shell and fire off the commands you installed. If one fails, rerun the installer for just that target and it'll sort itself out.
 
 ```text
 claude
@@ -94,8 +94,6 @@ vibe
 ollama
 rtk
 ```
-
-If one fails, rerun the installer for that target only.
 
 ## Run from source (any OS)
 

@@ -185,6 +185,8 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned", script)
         self.assertIn("Ensure-WindowsCliPathEntries", script)
         self.assertIn("Send-WindowsEnvironmentChanged", script)
+        self.assertIn("Ensure-ClaudeNativeCommandBridge", script)
+        self.assertIn("'%USERPROFILE%\\.local\\bin\\claude.exe'", script.replace('"', "'"))
         self.assertIn("Join-Path $env:APPDATA 'npm'", script)
         self.assertIn("Join-Path $env:LOCALAPPDATA 'agy\\bin'", script)
         self.assertIn("Join-Path $env:USERPROFILE '.cargo\\bin'", script)
@@ -2319,10 +2321,13 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
         self.assertIn("function Test-ClaudeCliRunning", script)
         self.assertIn("function Install-ClaudeNative", script)
         self.assertIn("function Update-ClaudeNative", script)
-        self.assertIn("if (Test-ClaudeCliRunning) { return }", script)
+        self.assertIn("if (Test-ClaudeCliRunning) { Ensure-ClaudeNativeCommandBridge; return }", script)
+        self.assertIn("ExecutablePath", script)
         self.assertIn(".local\\bin\\claude.exe", script)
         self.assertIn("& $claudeExe update", script)
         self.assertIn("https://claude.ai/install.ps1", script)
+        self.assertIn("Claude native installer did not create", script)
+        self.assertIn("Ensure-ClaudeNativeCommandBridge", script)
         self.assertIn("'uninstall' '-g' '@anthropic-ai/claude-code'", script)
         self.assertNotIn("Repair-ClaudeAfterFailedUpdate", script)
         self.assertNotIn("claude.exe.old.*", script)
@@ -2346,8 +2351,9 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
         self.assertIn("CreateObject(\"WScript.Shell\")", vbs)
         self.assertIn("powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File", vbs)
         self.assertIn(r"C:\Users\Admin\AppData\Local\InstallTheCli\auto_update_clis.ps1", vbs)
-        # WshShell.Run(..., 0, False) -> 0 means "hide window", False means "don't wait"
-        self.assertIn(", 0, False", vbs)
+        # 0 hides the window; True waits so Task Scheduler gets the real exit code.
+        self.assertIn(", 0, True)", vbs)
+        self.assertIn("WScript.Quit exitCode", vbs)
         # Embedded path quotes must be VBScript-doubled, not raw `"`
         self.assertIn('""', vbs)
 
@@ -2478,7 +2484,8 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
                 vbs_text = f.read()
             self.assertIn("WScript.Shell", vbs_text)
             self.assertIn(script_path.replace('"', '""'), vbs_text)
-            self.assertIn(", 0, False", vbs_text)
+            self.assertIn(", 0, True)", vbs_text)
+            self.assertIn("WScript.Quit exitCode", vbs_text)
 
             run_args = run_mock.call_args.args[0]
             task_command = run_args[-1]

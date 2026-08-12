@@ -760,6 +760,29 @@ function Ensure-WindowsCliPathEntries {
     }
 }
 
+function Ensure-ClaudeNativeCommandBridge {
+    if ($DryRun) { return }
+    try {
+        $claudeExe = Join-Path $env:USERPROFILE '.local\bin\claude.exe'
+        if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) { return }
+        $npmBin = Join-Path $env:APPDATA 'npm'
+        if (-not (Test-Path -LiteralPath $npmBin -PathType Container)) {
+            New-Item -ItemType Directory -Path $npmBin -Force | Out-Null
+        }
+        $bridgePath = Join-Path $npmBin 'claude.cmd'
+        $bridge = @('@echo off', '"%USERPROFILE%\.local\bin\claude.exe" %*', '') -join "`r`n"
+        $current = if (Test-Path -LiteralPath $bridgePath -PathType Leaf) {
+            Get-Content -LiteralPath $bridgePath -Raw -ErrorAction SilentlyContinue
+        } else { $null }
+        if ($current -ne $bridge) {
+            [System.IO.File]::WriteAllText($bridgePath, $bridge, (New-Object System.Text.UTF8Encoding($false)))
+            Write-Log "Installed native Claude command bridge for existing terminal sessions: $bridgePath"
+        }
+    } catch {
+        Write-WarnLog "Could not install the native Claude command bridge: $($_.Exception.Message)"
+    }
+}
+
 function Test-SafeWindowsCliPath {
     param([Parameter(Mandatory = $true)][string]$Path)
     try {
@@ -880,6 +903,7 @@ function Ensure-WindowsCliTerminalCompatibility {
     Write-Log 'Repairing Windows terminal compatibility for AI CLI shims and profiles...'
     Repair-CurrentWindowsPowerShellModulePath
     Ensure-WindowsCliPathEntries
+    Ensure-ClaudeNativeCommandBridge
     Remove-StaleAiCliSessionFunctions
 
     $documents = [Environment]::GetFolderPath('MyDocuments')
@@ -1292,6 +1316,19 @@ function Ensure-WindowsCliPathEntries {
   } catch { }
 }
 
+function Ensure-ClaudeNativeCommandBridge {
+  try {
+    $claudeExe = Join-Path $env:USERPROFILE '.local\bin\claude.exe'
+    if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) { return }
+    $npmBin = Join-Path $env:APPDATA 'npm'
+    if (-not (Test-Path -LiteralPath $npmBin -PathType Container)) { New-Item -ItemType Directory -Path $npmBin -Force | Out-Null }
+    $bridgePath = Join-Path $npmBin 'claude.cmd'
+    $bridge = @('@echo off', '"%USERPROFILE%\.local\bin\claude.exe" %*', '') -join "`r`n"
+    $current = if (Test-Path -LiteralPath $bridgePath -PathType Leaf) { Get-Content -LiteralPath $bridgePath -Raw -ErrorAction SilentlyContinue } else { $null }
+    if ($current -ne $bridge) { [System.IO.File]::WriteAllText($bridgePath, $bridge, (New-Object System.Text.UTF8Encoding($false))) }
+  } catch { }
+}
+
 function Test-SafeWindowsCliPath([string]$Path) {
   try {
     $full = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
@@ -1365,6 +1402,7 @@ function Unblock-WindowsCliFiles {
 function Ensure-WindowsCliTerminalCompatibility {
   Repair-CurrentWindowsPowerShellModulePath
   Ensure-WindowsCliPathEntries
+  Ensure-ClaudeNativeCommandBridge
   $documents = [Environment]::GetFolderPath('MyDocuments')
   $windowsPowerShellAllHosts = Join-Path $documents 'WindowsPowerShell\profile.ps1'
   foreach ($profilePath in @(
@@ -1451,7 +1489,10 @@ function Stop-CodexCliForUpdate {
 
 function Test-ClaudeCliRunning {
   try {
-    $matches = Get-CimInstance Win32_Process -Filter "name = 'claude.exe'" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $claudeExe = [System.IO.Path]::GetFullPath((Join-Path $env:USERPROFILE '.local\bin\claude.exe'))
+    $matches = Get-CimInstance Win32_Process -Filter "name = 'claude.exe'" -ErrorAction SilentlyContinue | Where-Object {
+      $_.ExecutablePath -and [System.IO.Path]::GetFullPath($_.ExecutablePath).Equals($claudeExe, [System.StringComparison]::OrdinalIgnoreCase)
+    } | Select-Object -First 1
     return $null -ne $matches
   } catch {
     return $false
@@ -1464,30 +1505,30 @@ function Test-ClaudeCliRunning {
 # update fails, and migrate any legacy @anthropic-ai/claude-code npm install
 # out of the way first (its npm shims would shadow the native exe on PATH).
 function Install-ClaudeNative {
-  try {
-    Invoke-Expression (Invoke-RestMethod 'https://claude.ai/install.ps1') *>&1 | Out-Null
-  } catch { }
+  Invoke-Expression (Invoke-RestMethod 'https://claude.ai/install.ps1') *>&1 | Out-Null
 }
 
 function Update-ClaudeNative {
-  if (Test-ClaudeCliRunning) { return }
   $claudeExe = Join-Path $env:USERPROFILE '.local\bin\claude.exe'
-  $hadLegacy = $false
+  if (Test-ClaudeCliRunning) { Ensure-ClaudeNativeCommandBridge; return }
   if ($npmPath) {
     try {
       $prefix = Get-NpmPrefix
       if ($prefix -and (Test-Path -LiteralPath (Join-Path $prefix 'node_modules\@anthropic-ai\claude-code'))) {
-        $hadLegacy = $true
         & $npmPath @NpmFlags uninstall -g '@anthropic-ai/claude-code' *>&1 | Out-Null
       }
     } catch { }
   }
   if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) {
-    if ($hadLegacy) { Install-ClaudeNative }
-    return
+    Install-ClaudeNative
+    if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) { throw "Claude native installer did not create $claudeExe" }
   }
   & $claudeExe update *>&1 | Out-Null
-  if ($LASTEXITCODE -ne 0) { Install-ClaudeNative }
+  if ($LASTEXITCODE -ne 0) {
+    Install-ClaudeNative
+    if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) { throw "Claude native reinstall did not restore $claudeExe" }
+  }
+  Ensure-ClaudeNativeCommandBridge
 }
 
 function Test-NpmCliInstallHealth([string]$Package) {
@@ -1735,7 +1776,7 @@ function Ensure-HiddenAutoUpdateTask {
     # VBS wrapper -> powershell ensures the updater never flashes a console
     # window. `powershell -WindowStyle Hidden` directly is not actually hidden
     # at logon on some Windows builds.
-    $vbsBody = "Set WshShell = CreateObject(`"WScript.Shell`")`r`nWshShell.Run `"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"`"$AutoUpdateScriptPath`"`"`", 0, False`r`n"
+    $vbsBody = "Set WshShell = CreateObject(`"WScript.Shell`")`r`nexitCode = WshShell.Run(`"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"`"$AutoUpdateScriptPath`"`"`", 0, True)`r`nWScript.Quit exitCode`r`n"
     Set-Content -LiteralPath $AutoUpdateVbsPath -Value $vbsBody -Encoding ASCII
 
     $actionArgs = "`"$AutoUpdateVbsPath`" //nologo"

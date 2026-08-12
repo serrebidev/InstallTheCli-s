@@ -940,6 +940,23 @@ function Ensure-WindowsCliPathEntries {
   } catch { }
 }
 
+function Ensure-ClaudeNativeCommandBridge {
+  try {
+    $claudeExe = Join-Path $env:USERPROFILE '.local\bin\claude.exe'
+    if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) { return }
+    $npmBin = Join-Path $env:APPDATA 'npm'
+    if (-not (Test-Path -LiteralPath $npmBin -PathType Container)) {
+      New-Item -ItemType Directory -Path $npmBin -Force | Out-Null
+    }
+    $bridgePath = Join-Path $npmBin 'claude.cmd'
+    $bridge = @('@echo off', '"%USERPROFILE%\.local\bin\claude.exe" %*', '') -join "`r`n"
+    $current = if (Test-Path -LiteralPath $bridgePath -PathType Leaf) {
+      Get-Content -LiteralPath $bridgePath -Raw -ErrorAction SilentlyContinue
+    } else { $null }
+    if ($current -ne $bridge) { Write-Utf8NoBom $bridgePath $bridge }
+  } catch { }
+}
+
 function Test-SafeWindowsCliPath([string]$Path) {
   try {
     $full = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
@@ -1013,6 +1030,7 @@ function Unblock-WindowsCliFiles {
 function Ensure-WindowsCliTerminalCompatibility {
   Repair-CurrentWindowsPowerShellModulePath
   Ensure-WindowsCliPathEntries
+  Ensure-ClaudeNativeCommandBridge
   $documents = [Environment]::GetFolderPath('MyDocuments')
   $windowsPowerShellAllHosts = Join-Path $documents 'WindowsPowerShell\profile.ps1'
   foreach ($profilePath in @(
@@ -1145,34 +1163,37 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         # npm shims would shadow the native claude.exe on PATH).
         "function Test-ClaudeCliRunning {",
         "  try {",
-        "    $matches = Get-CimInstance Win32_Process -Filter \"name = 'claude.exe'\" -ErrorAction SilentlyContinue | Select-Object -First 1",
+        "    $claudeExe = [System.IO.Path]::GetFullPath((Join-Path $env:USERPROFILE '.local\\bin\\claude.exe'))",
+        "    $matches = Get-CimInstance Win32_Process -Filter \"name = 'claude.exe'\" -ErrorAction SilentlyContinue | Where-Object {",
+        "      $_.ExecutablePath -and [System.IO.Path]::GetFullPath($_.ExecutablePath).Equals($claudeExe, [System.StringComparison]::OrdinalIgnoreCase)",
+        "    } | Select-Object -First 1",
         "    return $null -ne $matches",
         "  } catch {",
         "    return $false",
         "  }",
         "}",
         "function Install-ClaudeNative {",
-        "  try {",
-        f"    Invoke-Expression (Invoke-RestMethod {powershell_single_quote(CLAUDE_INSTALL_PS1)}) *>&1 | Out-Null",
-        "  } catch { }",
+        f"  Invoke-Expression (Invoke-RestMethod {powershell_single_quote(CLAUDE_INSTALL_PS1)}) *>&1 | Out-Null",
         "}",
         "function Update-ClaudeNative {",
-        "  if (Test-ClaudeCliRunning) { return }",
         "  $claudeExe = Join-Path $env:USERPROFILE '.local\\bin\\claude.exe'",
-        "  $hadLegacy = $false",
+        "  if (Test-ClaudeCliRunning) { Ensure-ClaudeNativeCommandBridge; return }",
         "  try {",
         "    $prefix = Get-NpmPrefix",
         "    if ($prefix -and (Test-Path -LiteralPath (Join-Path $prefix 'node_modules\\@anthropic-ai\\claude-code'))) {",
-        "      $hadLegacy = $true",
         f"      $null = & $npm {npm_quiet_args} 'uninstall' '-g' {claude_pkg_literal} *>&1",
         "    }",
         "  } catch { }",
         "  if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) {",
-        "    if ($hadLegacy) { Install-ClaudeNative }",
-        "    return",
+        "    Install-ClaudeNative",
+        "    if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) { throw \"Claude native installer did not create $claudeExe\" }",
         "  }",
         "  $null = & $claudeExe update *>&1",
-        "  if ($LASTEXITCODE -ne 0) { Install-ClaudeNative }",
+        "  if ($LASTEXITCODE -ne 0) {",
+        "    Install-ClaudeNative",
+        "    if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) { throw \"Claude native reinstall did not restore $claudeExe\" }",
+        "  }",
+        "  Ensure-ClaudeNativeCommandBridge",
         "}",
         "function Test-NpmCliInstallHealth([string]$Package) {",
         "  try {",
@@ -1345,14 +1366,16 @@ def build_cli_auto_update_vbs(script_path: str) -> str:
     """Tiny VBScript wrapper that launches the PowerShell updater fully hidden.
 
     `powershell.exe -WindowStyle Hidden` still flashes a console briefly on
-    some Windows builds; wscript.exe + WshShell.Run(..., 0, False) does not.
+    some Windows builds; wscript.exe + WshShell.Run(..., 0, True) does not.
+    Waiting lets Task Scheduler record the updater's real exit code.
     Mirrors the user's hand-rolled `update-codex-gemini.vbs` setup.
     """
     escaped = script_path.replace('"', '""')
     return (
         "Set WshShell = CreateObject(\"WScript.Shell\")\r\n"
-        "WshShell.Run \"powershell.exe -NoProfile -ExecutionPolicy Bypass "
-        "-WindowStyle Hidden -File \"\"" + escaped + "\"\"\", 0, False\r\n"
+        "exitCode = WshShell.Run(\"powershell.exe -NoProfile -ExecutionPolicy Bypass "
+        "-WindowStyle Hidden -File \"\"" + escaped + "\"\"\", 0, True)\r\n"
+        "WScript.Quit exitCode\r\n"
     )
 
 
