@@ -6,7 +6,7 @@ One-click Windows installer for AI CLIs used by InstallTheCli.
 Installs all supported AI CLIs (or one selected target) using official package sources:
 - winget for Node.js, Python 3.14, Ollama, Antigravity, and Visual Studio Code
 - Anthropic's official native installer (claude.ai/install.ps1) for Claude
-- npm for Codex/Grok/Qwen/Copilot
+- npm for Codex/Grok/Qwen/Copilot/OpenClaw/IronClaw/Freebuff/Command Code
 - uv/pip for Mistral Vibe
 
 Also configures a hidden Scheduled Task (startup, logon, daily) unless disabled.
@@ -15,7 +15,7 @@ Also configures a hidden Scheduled Task (startup, logon, daily) unless disabled.
 Subcommand: install-all (default), install, list, setup-updater, help.
 
 .PARAMETER Target
-Target for the install subcommand: claude, codex, antigravity, vscode, grok, qwen, copilot, openclaw, ironclaw, freebuff, mistral, ollama, all.
+Target for the install subcommand: claude, codex, antigravity, antigravity_cli, antigravity_ide, vscode, grok, qwen, copilot, openclaw, ironclaw, freebuff, commandcode, mistral, ollama, rtk, all.
 
 .PARAMETER NoAutoUpdate
 Skips creation/update of the hidden scheduled auto-update task.
@@ -87,6 +87,7 @@ $NpmCliSpecs = @{
     openclaw = @{ Label = 'OpenClaw CLI'; Packages = @('openclaw') }
     ironclaw = @{ Label = 'IronClaw CLI'; Packages = @('ironclaw') }
     freebuff = @{ Label = 'Freebuff CLI'; Packages = @('freebuff') }
+    commandcode = @{ Label = 'Command Code CLI'; Packages = @('command-code') }
 }
 
 function Write-Log {
@@ -1593,6 +1594,7 @@ if ($npmPath) {
   Update-NpmCli @("openclaw")
   Update-NpmCli @("ironclaw")
   Update-NpmCli @("freebuff")
+  Update-NpmCli @("command-code")
 }
 
 if (Test-Cmd "py") {
@@ -1792,7 +1794,7 @@ function Ensure-HiddenAutoUpdateTask {
 
 function Show-Targets {
     @(
-        'claude', 'codex', 'antigravity', 'antigravity_cli', 'antigravity_ide', 'vscode', 'grok', 'qwen', 'copilot', 'openclaw', 'ironclaw', 'freebuff', 'mistral', 'ollama', 'rtk', 'all'
+        'claude', 'codex', 'antigravity', 'antigravity_cli', 'antigravity_ide', 'vscode', 'grok', 'qwen', 'copilot', 'openclaw', 'ironclaw', 'freebuff', 'commandcode', 'mistral', 'ollama', 'rtk', 'all'
     ) | ForEach-Object { Write-Host $_ }
 }
 
@@ -1803,7 +1805,7 @@ Usage:
 
 Commands:
   install-all              Install all supported CLIs (default)
-  install <target>         Install one target (claude/codex/antigravity/antigravity_cli/antigravity_ide/vscode/grok/qwen/copilot/openclaw/ironclaw/freebuff/mistral/ollama/rtk/all)
+  install <target>         Install one target (claude/codex/antigravity/antigravity_cli/antigravity_ide/vscode/grok/qwen/copilot/openclaw/ironclaw/freebuff/commandcode/mistral/ollama/rtk/all)
   setup-updater            Configure hidden auto-update Scheduled Task only
   list                     List supported targets
   help                     Show help (or use: Get-Help .\install_all_windows.ps1 -Detailed)
@@ -1828,6 +1830,9 @@ function Install-Target {
         'openclaw' { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'openclaw' -NpmPath $npm }
         'ironclaw' { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'ironclaw' -NpmPath $npm }
         'freebuff' { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'freebuff' -NpmPath $npm }
+        'commandcode' { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'commandcode' -NpmPath $npm }
+        'command-code' { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'commandcode' -NpmPath $npm }
+        'cmdc'     { $npm = Ensure-NodeAndNpm; Install-NpmCliTarget -Key 'commandcode' -NpmPath $npm }
         'mistral' { Install-MistralVibe }
         'mistral-vibe' { Install-MistralVibe }
         'vibe'    { Install-MistralVibe }
@@ -1841,7 +1846,7 @@ function Install-Target {
 function Install-AllTargets {
     Install-ClaudeNativeCli
     $npm = Ensure-NodeAndNpm
-    foreach ($key in @('codex','grok','qwen','copilot','openclaw','ironclaw','freebuff')) {
+    foreach ($key in @('codex','grok','qwen','copilot','openclaw','ironclaw','freebuff','commandcode')) {
         Install-NpmCliTarget -Key $key -NpmPath $npm
     }
     Install-MistralVibe

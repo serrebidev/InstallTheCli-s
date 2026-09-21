@@ -226,6 +226,29 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("official", ollama.help_text.lower())
         self.assertEqual(ollama.macos_brew_formula, "ollama")
 
+    def test_command_code_spec_uses_npm_package_and_collision_safe_command(self) -> None:
+        spec = next(spec for spec in m.CLI_SPECS if spec.key == "commandcode")
+        self.assertEqual(m.COMMAND_CODE_NPM_PACKAGE, "command-code")
+        self.assertEqual(spec.package_candidates, (m.COMMAND_CODE_NPM_PACKAGE,))
+        # Never probe a bare `cmd`: on Windows `where cmd` always resolves to
+        # C:\Windows\System32\cmd.exe, which would report Command Code as
+        # installed on every machine and aim its desktop shortcut at the shell.
+        self.assertNotIn("cmd", spec.command_candidates)
+        self.assertIn("cmdc", spec.command_candidates)
+        self.assertIn("command-code", spec.command_candidates)
+        self.assertTrue(spec.optional)
+        self.assertFalse(m.cli_is_app_installer(spec))
+        self.assertEqual(spec.macos_requires_node_version, (22, 0, 0))
+        self.assertIn(m.COMMAND_CODE_NPM_PACKAGE, m.MACOS_NPM_UPDATE_PACKAGES)
+
+    def test_command_code_installs_through_the_npm_candidate_path(self) -> None:
+        spec = next(spec for spec in m.CLI_SPECS if spec.key == "commandcode")
+        with patch.object(m, "npm_install_global", return_value=0) as install_mock:
+            ok, pkg = m.try_install_package_candidates("/fake/npm.cmd", spec, lambda _msg: None)
+        self.assertTrue(ok)
+        self.assertEqual(pkg, "command-code")
+        self.assertEqual(install_mock.call_args.args[1], "command-code")
+
     def test_chatgpt_desktop_app_spec_uses_codex_replacement_msstore_product_id(self) -> None:
         chatgpt_app = next(spec for spec in m.GUI_APP_SPECS if spec.key == "chatgpt_app")
         self.assertEqual(chatgpt_app.winget_id, "9PLM9XGG6VKS")
@@ -617,7 +640,7 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("Get-Help .\\install_all_windows.ps1 -Detailed", script)
         self.assertIn("install-all", script)
         self.assertIn("install <target>", script)
-        self.assertIn("copilot/openclaw/ironclaw/freebuff/mistral", script)
+        self.assertIn("copilot/openclaw/ironclaw/freebuff/commandcode/mistral", script)
         self.assertIn("setup-updater", script)
         self.assertIn("--no-update-notifier", script)
         self.assertIn("--include=optional", script)
@@ -4938,6 +4961,41 @@ class FreebuffScriptContentTests(unittest.TestCase):
         script = self._read("install_all_macos.sh")
         self.assertIn('install_npm_cli "Freebuff CLI" 16 "freebuff"', script)
         self.assertIn('update_npm_package "freebuff"', script)
+
+
+class CommandCodeScriptContentTests(unittest.TestCase):
+    """Command Code ships as the npm package `command-code`, and its `cmd`
+    binary collides with Windows' own cmd.exe, so each one-click script has to
+    install, target, and update it through the package name."""
+
+    def _read(self, name: str) -> str:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_windows_script_installs_and_updates_command_code(self) -> None:
+        script = self._read("install_all_windows.ps1")
+        self.assertIn(
+            "commandcode = @{ Label = 'Command Code CLI'; Packages = @('command-code') }", script
+        )
+        self.assertIn('Install-NpmCliTarget -Key \'commandcode\' -NpmPath $npm', script)
+        self.assertIn("'openclaw','ironclaw','freebuff','commandcode'", script)
+        self.assertIn('Update-NpmCli @("command-code")', script)
+
+    def test_linux_script_installs_and_updates_command_code(self) -> None:
+        script = self._read("install_all_linux.sh")
+        self.assertIn('install_npm_cli "Command Code CLI" "command-code"', script)
+        self.assertIn('update_npm_cli "Command Code CLI" "command-code"', script)
+        self.assertIn("openclaw|ironclaw|freebuff|commandcode|command-code|cmdc", script)
+
+    def test_macos_script_installs_and_updates_command_code(self) -> None:
+        script = self._read("install_all_macos.sh")
+        self.assertIn('install_npm_cli "Command Code CLI" 22 "command-code"', script)
+        self.assertIn('update_npm_package "command-code"', script)
+
+    def test_generated_macos_launch_agent_updates_command_code(self) -> None:
+        script = m.build_macos_cli_auto_update_script()
+        self.assertIn("update_npm_package command-code", script)
 
 
 if __name__ == "__main__":  # pragma: no cover

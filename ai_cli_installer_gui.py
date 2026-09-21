@@ -88,6 +88,11 @@ CLAUDE_INSTALL_SH = "https://claude.ai/install.sh"
 GROK_NPM_PACKAGE = "@vibe-kit/grok-cli"
 OPENCLAW_NPM_PACKAGE = "openclaw"
 FREEBUFF_NPM_PACKAGE = "freebuff"
+# Command Code installs the `cmd` CLI, but npm also registers collision-free
+# aliases (`cmdc`, `command-code`) in the same bin directory. We detect and
+# launch it by those aliases: a bare `cmd` lookup on Windows always resolves to
+# C:\Windows\System32\cmd.exe, which would make detection and shortcuts lie.
+COMMAND_CODE_NPM_PACKAGE = "command-code"
 # Freebuff Desktop has no winget/Homebrew/Flatpak listing. freebuff.com serves
 # version-agnostic redirect endpoints that land on the current GitHub release
 # asset, so these URLs stay correct across releases and must not be pinned to a
@@ -104,7 +109,12 @@ NPM_QUIET_FLAGS = ["--no-fund", "--no-audit", "--no-update-notifier", "--logleve
 PIP_QUIET_FLAGS = ["--disable-pip-version-check", "--no-input", "--quiet"]
 MACOS_BREW_FORMULA_CLIS = ("qwen-code", "mistral-vibe", "ollama", "ironclaw")
 MACOS_BREW_CASK_CLIS = ("claude-code", "codex", "copilot-cli", "antigravity", "visual-studio-code", "antigravity-ide")
-MACOS_NPM_UPDATE_PACKAGES = (GROK_NPM_PACKAGE, OPENCLAW_NPM_PACKAGE, FREEBUFF_NPM_PACKAGE)
+MACOS_NPM_UPDATE_PACKAGES = (
+    GROK_NPM_PACKAGE,
+    OPENCLAW_NPM_PACKAGE,
+    FREEBUFF_NPM_PACKAGE,
+    COMMAND_CODE_NPM_PACKAGE,
+)
 RTK_OPTIONAL_INTEGRATIONS = (
     ("GitHub Copilot CLI", ("copilot", "github-copilot-cli", "github-copilot"), ("--copilot",)),
     ("OpenCode", ("opencode",), ("--opencode",)),
@@ -331,6 +341,21 @@ CLI_SPECS: tuple[CliSpec, ...] = (
         shortcut_name="Freebuff CLI",
         macos_requires_node_major=16,
         macos_requires_node_version=(16, 0, 0),
+        optional=True,
+    ),
+    CliSpec(
+        key="commandcode",
+        label="Command Code CLI",
+        help_text=(
+            "Installs the Command Code CLI (npm package command-code, Node 22+ required). "
+            "The `cmd` command is detected and launched through its alias `cmdc` so it never "
+            "collides with Windows' built-in cmd.exe."
+        ),
+        package_candidates=(COMMAND_CODE_NPM_PACKAGE,),
+        command_candidates=("command-code", "cmdc"),
+        shortcut_name="Command Code CLI",
+        macos_requires_node_major=22,
+        macos_requires_node_version=(22, 0, 0),
         optional=True,
     ),
     CliSpec(
@@ -5510,7 +5535,7 @@ class InstallerFrame(wx.Frame):
             return
 
         needs_npm = (
-            any(spec.key not in ("mistral", "ollama") and not cli_is_app_installer(spec) for spec in selected)
+            any(spec.key not in ("mistral", "ollama", "rtk") and not cli_is_app_installer(spec) for spec in selected)
             and not is_macos()
         )
         npm_exe: Optional[str] = None
