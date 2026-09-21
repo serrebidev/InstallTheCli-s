@@ -1941,7 +1941,7 @@ class CommandAndDetectionTests(unittest.TestCase):
 
     def test_uninstall_app_cli_removes_claude_exe_on_windows(self) -> None:
         claude = next(spec for spec in m.CLI_SPECS if spec.key == "claude")
-        with tempfile.TemporaryDirectory() as home:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as appdata:
             bin_dir = os.path.join(home, ".local", "bin")
             os.makedirs(bin_dir)
             claude_exe = os.path.join(bin_dir, "claude.exe")
@@ -1952,11 +1952,55 @@ class CommandAndDetectionTests(unittest.TestCase):
                 patch.object(m, "is_macos", return_value=False),
                 patch.object(m, "remove_legacy_claude_npm_install", return_value=False),
                 patch.object(m.os.path, "expanduser", return_value=home),
+                # Never read the real %APPDATA% here: the bridge lookup must not
+                # be able to delete the machine owner's claude.cmd.
+                patch.dict(os.environ, {"AppData": appdata}),
             ):
                 success, pkg = m.uninstall_app_cli(claude, lambda _msg: None)
             self.assertTrue(success)
             self.assertEqual(pkg, "claude-code")
             self.assertFalse(os.path.exists(claude_exe))
+
+    def test_claude_native_bridge_path_only_matches_the_native_shim(self) -> None:
+        with tempfile.TemporaryDirectory() as appdata:
+            npm_dir = os.path.join(appdata, "npm")
+            os.makedirs(npm_dir)
+            bridge = os.path.join(npm_dir, "claude.cmd")
+            with patch.dict(os.environ, {"AppData": appdata}):
+                self.assertIsNone(m.claude_native_bridge_path())
+                with open(bridge, "w", encoding="utf-8") as f:
+                    f.write("@echo off\r\nnpm shim for something else\r\n")
+                self.assertIsNone(m.claude_native_bridge_path())
+                with open(bridge, "w", encoding="utf-8") as f:
+                    f.write('@echo off\r\n"%USERPROFILE%\\.local\\bin\\claude.exe" %*\r\n')
+                self.assertEqual(m.claude_native_bridge_path(), bridge)
+
+    def test_uninstall_app_cli_removes_the_stale_claude_bridge_on_windows(self) -> None:
+        # A leftover %APPDATA%\npm\claude.cmd keeps resolving `claude` to the
+        # removed native exe and makes detection report Claude as installed.
+        claude = next(spec for spec in m.CLI_SPECS if spec.key == "claude")
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as appdata:
+            bin_dir = os.path.join(home, ".local", "bin")
+            os.makedirs(bin_dir)
+            claude_exe = os.path.join(bin_dir, "claude.exe")
+            with open(claude_exe, "w", encoding="utf-8") as f:
+                f.write("native")
+            npm_dir = os.path.join(appdata, "npm")
+            os.makedirs(npm_dir)
+            bridge = os.path.join(npm_dir, "claude.cmd")
+            with open(bridge, "w", encoding="utf-8") as f:
+                f.write('@echo off\r\n"%USERPROFILE%\\.local\\bin\\claude.exe" %*\r\n')
+            with (
+                patch.object(m, "is_windows", return_value=True),
+                patch.object(m, "is_macos", return_value=False),
+                patch.object(m, "remove_legacy_claude_npm_install", return_value=False),
+                patch.object(m.os.path, "expanduser", return_value=home),
+                patch.dict(os.environ, {"AppData": appdata}),
+            ):
+                success, _pkg = m.uninstall_app_cli(claude, lambda _msg: None)
+            self.assertTrue(success)
+            self.assertFalse(os.path.exists(claude_exe))
+            self.assertFalse(os.path.exists(bridge))
 
     def test_try_install_openclaw_official_macos_checks_brew_node_and_no_onboard(self) -> None:
         spec = next(spec for spec in m.CLI_SPECS if spec.key == "openclaw")
@@ -3535,6 +3579,59 @@ class NodeInstallAndWorkflowTests(unittest.TestCase):
         self.assertTrue(any("macOS AI CLI Installer started." in line for line in dummy.logs))
         self.assertTrue(any("FAKE: macOS LaunchAgent configured" in line for line in dummy.logs))
 
+    def test_run_install_macos_routes_app_installers_through_ensure_app_cli(self) -> None:
+        # The macOS arm had no cli_is_app_installer branch, so the standalone
+        # Antigravity CLI (agy) fell through to an npm install of a package that
+        # is not the official CLI instead of Google's official install.sh.
+        dummy = DummyFrame()
+        dummy._run_install = types.MethodType(m.InstallerFrame._run_install, dummy)
+        antigravity_cli = next(spec for spec in m.CLI_SPECS if spec.key == "antigravity_cli")
+        self.assertTrue(m.cli_is_app_installer(antigravity_cli))
+
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "is_admin", return_value=False),
+            patch.object(m, "ensure_homebrew"),
+            patch.object(m, "ensure_node_via_brew"),
+            patch.object(m, "find_npm", return_value="/opt/homebrew/bin/npm"),
+            patch.object(m, "get_cli_bin_dirs", return_value=["/opt/homebrew/bin"]),
+            patch.object(m, "add_dirs_to_path", return_value=([], None)),
+            patch.object(m, "filter_system_path_dirs", return_value=[]),
+            patch.object(m, "ensure_app_cli", return_value=(True, "antigravity-cli")) as app_mock,
+            patch.object(m, "try_install_macos_cli") as macos_cli_mock,
+            patch.object(m, "resolve_command_path", return_value="/Users/admin/.local/bin/agy"),
+            patch.object(m, "ensure_cli_auto_update_task", return_value=[]),
+            patch.object(m, "create_cli_desktop_shortcut", return_value="/Users/admin/Desktop/Antigravity CLI.command"),
+        ):
+            dummy._run_install([antigravity_cli])
+
+        app_mock.assert_called_once_with(antigravity_cli, dummy.log)
+        macos_cli_mock.assert_not_called()
+        self.assertTrue(any("Resolved command path for Antigravity CLI" in line for line in dummy.logs))
+
+    def test_run_uninstall_macos_routes_app_installers_through_uninstall_app_cli(self) -> None:
+        dummy = DummyFrame()
+        dummy._run_uninstall = types.MethodType(m.InstallerFrame._run_uninstall, dummy)
+        antigravity_cli = next(spec for spec in m.CLI_SPECS if spec.key == "antigravity_cli")
+
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "is_admin", return_value=False),
+            patch.object(m, "find_npm") as npm_mock,
+            patch.object(m, "uninstall_app_cli", return_value=(True, "antigravity-cli")) as app_mock,
+            patch.object(m, "try_uninstall_macos_cli") as macos_cli_mock,
+            patch.object(m, "remove_cli_desktop_shortcuts"),
+            patch.object(m, "remove_cli_auto_update_packages") as auto_mock,
+        ):
+            dummy._run_uninstall([antigravity_cli])
+
+        npm_mock.assert_not_called()
+        app_mock.assert_called_once_with(antigravity_cli, dummy.log)
+        macos_cli_mock.assert_not_called()
+        auto_mock.assert_not_called()
+
     def test_run_uninstall_macos_uses_macos_uninstallers_without_npm_precheck(self) -> None:
         dummy = DummyFrame()
         dummy._run_uninstall = types.MethodType(m.InstallerFrame._run_uninstall, dummy)
@@ -4121,6 +4218,38 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIsNone(spec.macos_brew_formula)
         self.assertIsNone(spec.macos_brew_cask)
         self.assertIsNone(spec.macos_official_install_url)
+
+    def test_try_uninstall_rtk_reports_failure_when_the_binary_survives(self) -> None:
+        # Both branches used to return success, so a locked rtk.exe was reported
+        # as uninstalled while it stayed on disk.
+        spec = next(s for s in m.CLI_SPECS if s.key == "rtk")
+        logs: list[str] = []
+        with (
+            patch.object(m, "find_cargo", return_value=None),
+            patch.object(m, "is_linux", return_value=False),
+            patch.object(m.os.path, "isfile", return_value=True),
+            patch.object(m.os, "unlink", side_effect=OSError("in use")),
+        ):
+            ok, detail = m.try_uninstall_rtk(spec, logs.append)
+        self.assertFalse(ok)
+        self.assertIn("could not be removed", detail or "")
+        self.assertTrue(any("could not be removed" in line for line in logs))
+
+    def test_ensure_rust_toolchain_reports_missing_winget_without_raising_oserror(self) -> None:
+        # A bare "winget" invocation raised FileNotFoundError, which the rtk
+        # caller's `except RuntimeError` did not catch and which aborted the
+        # whole install run.
+        logs: list[str] = []
+        with (
+            patch.object(m, "find_cargo", return_value=None),
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "find_winget", return_value=None),
+            patch.object(m, "run_command") as run_mock,
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                m.ensure_rust_toolchain(logs.append)
+        self.assertIn("winget was not found", str(ctx.exception))
+        run_mock.assert_not_called()
 
     def test_rtk_install_dispatched_to_try_install_rtk(self) -> None:
         spec = next(s for s in m.CLI_SPECS if s.key == "rtk")
@@ -4996,6 +5125,48 @@ class CommandCodeScriptContentTests(unittest.TestCase):
     def test_generated_macos_launch_agent_updates_command_code(self) -> None:
         script = m.build_macos_cli_auto_update_script()
         self.assertIn("update_npm_package command-code", script)
+
+
+class AuditFixScriptTests(unittest.TestCase):
+    """Regression guards for bugs found while auditing the install and update
+    paths. These are string-level checks because the defects live in generated
+    PowerShell/bash text that cannot run on every platform."""
+
+    def _read(self, name: str) -> str:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_profile_guard_escapes_regex_replacement_dollars(self) -> None:
+        # [regex]::Replace reads $_ in the replacement string as "the whole
+        # input". The guard block contains $_, so an unescaped replacement
+        # rewrites profile.ps1 with copies of itself on every install/update.
+        windows = self._read("install_all_windows.ps1")
+        self.assertEqual(windows.count("$Block.Replace('$', '$$')"), 2)
+        self.assertNotIn('[regex]::Replace($content, $pattern, "$Block`n")', windows)
+
+        generated = m.build_windows_terminal_compatibility_script()
+        self.assertIn("$Block.Replace('$', '$$')", generated)
+        self.assertNotIn('[regex]::Replace($content, $pattern, "$Block`n")', generated)
+
+    def test_linux_cron_file_is_newline_terminated(self) -> None:
+        # cron ignores a crontab file whose last line lacks a newline, and
+        # command substitution strips the heredoc's trailing newline.
+        linux = self._read("install_all_linux.sh")
+        self.assertIn("printf '%s\\n' \"$content\" > \"$path\"", linux)
+        self.assertNotIn("printf '%s' \"$content\" > \"$path\"", linux)
+
+    def test_linux_arch_enables_the_cronie_service(self) -> None:
+        # Arch's cronie package ships cronie.service; there is no crond.service,
+        # so the updater daemon was never enabled on Arch.
+        self.assertIn('arch) CRON_SERVICE_NAME="cronie"', self._read("install_all_linux.sh"))
+
+    def test_linux_install_all_survives_a_missing_mistral_python(self) -> None:
+        # Debian 12 / Ubuntu 22.04 ship Python < 3.12, so the optional Mistral
+        # Vibe CLI used to abort install-all before Ollama/Antigravity/VSCode.
+        linux = self._read("install_all_linux.sh")
+        self.assertIn('install_mistral_vibe || warn "Skipping optional Mistral Vibe CLI."', linux)
+        self.assertIn("Python 3.12+ is required for Mistral Vibe CLI; skipping it.", linux)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -578,7 +578,11 @@ function Ensure-ProfileBlock {
         $content = if (Test-Path -LiteralPath $Path) { Get-Content -LiteralPath $Path -Raw } else { '' }
         $pattern = "(?ms)^$([regex]::Escape($BeginMarker))\r?\n.*?^$([regex]::Escape($EndMarker))\r?\n?"
         if ($content -match $pattern) {
-            $updated = [regex]::Replace($content, $pattern, "$Block`n")
+            # Regex replacement strings treat $ tokens specially ($_ = whole
+            # input, $1, $& ...). The guard block contains $_ and would be
+            # spliced with copies of the profile, so escape every $ as $$.
+            $replacement = $Block.Replace('$', '$$')
+            $updated = [regex]::Replace($content, $pattern, "$replacement`n")
         } else {
             $separator = if ([string]::IsNullOrEmpty($content)) { '' } elseif ($content.StartsWith("`r`n") -or $content.StartsWith("`n")) { "`n" } else { "`n`n" }
             $updated = "$Block$separator$content"
@@ -1165,7 +1169,10 @@ function Ensure-ProfileBlock([string]$Path, [string]$BeginMarker, [string]$EndMa
     $content = if (Test-Path -LiteralPath $Path) { Get-Content -LiteralPath $Path -Raw } else { '' }
     $pattern = "(?ms)^$([regex]::Escape($BeginMarker))\r?\n.*?^$([regex]::Escape($EndMarker))\r?\n?"
     if ($content -match $pattern) {
-      $updated = [regex]::Replace($content, $pattern, "$Block`n")
+      # Escape $ so regex replacement tokens ($_ = whole input) cannot inject
+      # copies of the profile into the guard block.
+      $replacement = $Block.Replace('$', '$$')
+      $updated = [regex]::Replace($content, $pattern, "$replacement`n")
     } else {
       $separator = if ([string]::IsNullOrEmpty($content)) { '' } elseif ($content.StartsWith("`r`n") -or $content.StartsWith("`n")) { "`n" } else { "`n`n" }
       $updated = "$Block$separator$content"

@@ -79,6 +79,10 @@ MACOS_AUTO_UPDATE_SCRIPT_FILE = "auto_update_clis_macos.sh"
 MACOS_AUTO_UPDATE_PLIST_ID = "com.installthecli.ai-cli-updates"
 MACOS_AUTO_UPDATE_PLIST_FILE = MACOS_AUTO_UPDATE_PLIST_ID + ".plist"
 CODEX_NPM_PACKAGE = "@openai/codex"
+# Returned by try_install_package_candidates when a running Codex cannot be
+# closed. _run_install treats it like a Windows file lock, so it falls back to
+# the existing install instead of aborting the whole run.
+CODEX_CLOSE_FAILED_DETAIL = "Codex CLI could not be closed before npm install/update"
 # Claude Code ships via Anthropic's official native installer (claude.ai).
 # The npm package is legacy-only: we migrate it out of the way because its
 # npm shims shadow the native %USERPROFILE%\.local\bin\claude.exe on PATH.
@@ -809,7 +813,11 @@ function Ensure-ProfileBlock([string]$Path, [string]$BeginMarker, [string]$EndMa
     $content = if (Test-Path -LiteralPath $Path) { Get-Content -LiteralPath $Path -Raw } else { '' }
     $pattern = "(?ms)^$([regex]::Escape($BeginMarker))\r?\n.*?^$([regex]::Escape($EndMarker))\r?\n?"
     if ($content -match $pattern) {
-      $updated = [regex]::Replace($content, $pattern, "$Block`n")
+      # Regex replacement strings treat $ tokens specially ($_ = whole input,
+      # $1, $&, $` ...). The PowerShell guard block contains $_ and would be
+      # spliced with copies of the profile, so escape every $ as $$ first.
+      $replacement = $Block.Replace('$', '$$')
+      $updated = [regex]::Replace($content, $pattern, "$replacement`n")
     } else {
       $separator = if ([string]::IsNullOrEmpty($content)) { '' } elseif ($content.StartsWith("`r`n") -or $content.StartsWith("`n")) { "`n" } else { "`n`n" }
       $updated = "$Block$separator$content"
@@ -3154,12 +3162,38 @@ def ensure_app_cli(spec: CliSpec, log: Callable[[str], None]) -> tuple[bool, Opt
     return (False, f"No macOS installer is configured for {spec.label}.")
 
 
+def claude_native_bridge_path() -> Optional[str]:
+    """Path of the %APPDATA%\\npm\\claude.cmd shim that forwards to the native
+    CLI, when that shim exists.
+
+    Terminals whose PATH predates the native migration resolve `claude` through
+    this file, so an uninstall has to remove it together with
+    ~/.local/bin/claude.exe. Left behind, `claude` resolves to a missing target
+    and resolve_command_path keeps reporting Claude as installed.
+    """
+    appdata = os.environ.get("AppData")
+    if not appdata:
+        return None
+    bridge = os.path.join(appdata, "npm", "claude.cmd")
+    try:
+        with open(bridge, "r", encoding="utf-8", errors="replace") as fh:
+            body = fh.read()
+    except OSError:
+        return None
+    if "claude.exe" in body:
+        return bridge
+    return None
+
+
 def uninstall_app_cli(spec: CliSpec, log: Callable[[str], None]) -> tuple[bool, Optional[str]]:
     if spec.key == "claude" and not is_macos():
         remove_legacy_claude_npm_install(log)
         home = os.path.expanduser("~")
         if is_windows():
             targets = [os.path.join(home, ".local", "bin", "claude.exe")]
+            bridge = claude_native_bridge_path()
+            if bridge:
+                targets.append(bridge)
         else:
             targets = [
                 os.path.join(home, ".local", "bin", "claude"),
@@ -3479,10 +3513,16 @@ def ensure_rust_toolchain(log: Callable[[str], None]) -> str:
         return cargo
 
     if is_windows():
+        winget = find_winget()
+        if not winget:
+            raise RuntimeError(
+                "Rust/cargo is required to build RTK, but winget was not found. Install Microsoft "
+                "App Installer / winget, or install Rust from https://rustup.rs/ and rerun."
+            )
         log("Installing Rust toolchain (Rustup) via winget...")
         code = run_command(
             [
-                "winget",
+                winget,
                 "install",
                 "--id",
                 RUSTUP_WINGET_ID,
@@ -3765,7 +3805,9 @@ def try_uninstall_rtk(
                 log(f"Warning: could not remove {link_target}: {exc}")
     if saw_success:
         return (True, package_name)
-    return (True, package_name)
+    err = f"{package_name} could not be removed from {rtk_exe}"
+    log(err)
+    return (False, err)
 
 
 def try_uninstall_mistral_vibe(
@@ -4653,7 +4695,7 @@ def try_install_package_candidates(
         if is_codex_package and is_windows():
             remove_codex_npm_temp_dirs(npm_exe, log)
             if not close_codex_cli_for_update(log):
-                last_error = "Codex CLI could not be closed before npm install/update"
+                last_error = CODEX_CLOSE_FAILED_DETAIL
                 log(last_error)
                 return (False, last_error)
         for attempt in range(1, NPM_INSTALL_MAX_ATTEMPTS + 1):
@@ -5177,6 +5219,15 @@ class InstallerFrame(wx.Frame):
         dirs = get_cli_bin_dirs(npm_exe, self._detection_log)
         dirs = dedupe_preserve_order(dirs + get_python_cli_bin_dirs(self._detection_log))
         dirs = dedupe_preserve_order(dirs + get_ollama_cli_bin_dirs(self._detection_log))
+        # rtk (~/.cargo/bin) and the app-installer CLIs (agy, VS Code,
+        # Antigravity, Claude) land outside the npm/python dirs. Without them a
+        # just-installed CLI still reads as "not installed" until the process
+        # PATH picks up the persisted entries, so the button flips back to
+        # "Install" and Install All would reinstall it in the same session.
+        dirs = dedupe_preserve_order(dirs + get_rtk_cli_bin_dirs(self._detection_log))
+        for app_spec in CLI_SPECS:
+            if cli_is_app_installer(app_spec):
+                dirs = dedupe_preserve_order(dirs + get_app_cli_bin_dirs(app_spec, self._detection_log))
         return dirs
 
     def _is_cli_installed(self, spec: CliSpec, cli_dirs: Optional[list[str]] = None) -> bool:
@@ -5561,6 +5612,11 @@ class InstallerFrame(wx.Frame):
                     success, detail = try_uninstall_ollama(self.log)
                 elif spec.key == "rtk":
                     success, detail = try_uninstall_rtk(spec, self.log)
+                elif cli_is_app_installer(spec):
+                    # Mirror the install dispatch: brew casks plus the agy
+                    # official installer, which try_uninstall_macos_cli would
+                    # miss (it would npm-uninstall a package that was never used).
+                    success, detail = uninstall_app_cli(spec, self.log)
                 else:
                     success, detail = try_uninstall_macos_cli(spec, self.log)
             elif spec.key == "mistral":
@@ -5699,6 +5755,14 @@ class InstallerFrame(wx.Frame):
                     success, pkg = ensure_ollama_via_winget(self.log)
                 elif spec.key == "rtk":
                     success, pkg = try_install_rtk(spec, self.log)
+                elif cli_is_app_installer(spec):
+                    # claude/antigravity/vscode/antigravity_ide have brew casks,
+                    # and the standalone Antigravity CLI (agy) has no cask at all
+                    # -- it only installs through Google's official install.sh,
+                    # which lives in ensure_app_cli. Routing it through
+                    # try_install_macos_cli would npm-install a package that is
+                    # not the official CLI.
+                    success, pkg = ensure_app_cli(spec, self.log)
                 else:
                     success, pkg = try_install_macos_cli(spec, self.log)
             elif spec.key == "mistral":
@@ -5715,7 +5779,7 @@ class InstallerFrame(wx.Frame):
                 if spec.optional:
                     self.log(f"Skipping optional {spec.label}: no working install candidate.")
                     continue
-                if is_probably_windows_file_lock_error(pkg):
+                if is_probably_windows_file_lock_error(pkg) or pkg == CODEX_CLOSE_FAILED_DETAIL:
                     cli_bin_dirs = get_cli_bin_dirs(npm_exe, self.log)
                     command_path = resolve_command_path(spec.command_candidates, cli_bin_dirs)
                     if command_path:

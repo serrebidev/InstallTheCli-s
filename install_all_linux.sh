@@ -185,7 +185,8 @@ configure_distro_package_metadata() {
   case "$DISTRO_FAMILY" in
     debian) CRON_SERVICE_NAME="cron" ;;
     fedora) CRON_SERVICE_NAME="crond" ;;
-    arch) CRON_SERVICE_NAME="crond" ;;
+    # Arch's cronie package ships cronie.service (there is no crond.service).
+    arch) CRON_SERVICE_NAME="cronie" ;;
     *) die "Unsupported distro family: ${DISTRO_FAMILY}" ;;
   esac
 }
@@ -407,7 +408,13 @@ install_npm_target() {
 }
 
 install_mistral_vibe() {
-  select_python_for_mistral || die "Python 3.12+ is required for Mistral Vibe CLI."
+  # Mistral Vibe is optional, and mainstream distros still ship Python 3.10/3.11
+  # (Debian 12, Ubuntu 22.04), so report the gap instead of dying: install-all
+  # must still get through Ollama, Antigravity, agy and VS Code.
+  select_python_for_mistral || {
+    warn "Python 3.12+ is required for Mistral Vibe CLI; skipping it."
+    return 1
+  }
 
   run_cmd "$PYTHON_BIN" -m pip install --user --upgrade "${PIP_FLAGS[@]}" pip
   run_cmd "$PYTHON_BIN" -m pip install --user --upgrade "${PIP_FLAGS[@]}" uv
@@ -680,7 +687,7 @@ install_rtk() {
 install_all_targets() {
   install_claude_native
   install_all_npm_clis
-  install_mistral_vibe
+  install_mistral_vibe || warn "Skipping optional Mistral Vibe CLI."
   install_ollama_official
   install_antigravity_linux
   install_antigravity_cli_linux
@@ -694,7 +701,7 @@ install_single_target() {
       install_all_targets
       ;;
     mistral|mistral-vibe|vibe)
-      install_mistral_vibe
+      install_mistral_vibe || die "Failed to install Mistral Vibe CLI."
       ;;
     ollama)
       install_ollama_official
@@ -952,7 +959,11 @@ write_root_file() {
     return 0
   fi
   mkdir -p "$(dirname "$path")"
-  printf '%s' "$content" > "$path"
+  # Always terminate with a newline: cron silently ignores a crontab file whose
+  # last line has no newline ("Missing newline before EOF"), so the updater job
+  # would never run. Command substitution strips trailing newlines, hence the
+  # explicit \n here rather than relying on the heredoc's.
+  printf '%s\n' "$content" > "$path"
   chmod "$mode" "$path"
 }
 
