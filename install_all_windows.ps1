@@ -76,6 +76,11 @@ $LocalAppDataRoot = if ($env:LocalAppData) { $env:LocalAppData } else { Join-Pat
 $SupportDir = Join-Path $LocalAppDataRoot 'InstallTheCli'
 $AutoUpdateScriptPath = Join-Path $SupportDir 'one_click_update_windows.ps1'
 $AutoUpdateVbsPath = Join-Path $SupportDir 'one_click_update_windows.vbs'
+# Records that Claude Code was installed on this machine. The hidden updater
+# only manages Claude when this marker, the native exe, or a legacy npm install
+# is present, so it no longer installs Claude uninvited or resurrects it after
+# an uninstall (while still self-healing a broken install).
+$ClaudeStateMarkerPath = Join-Path $SupportDir 'claude_native_installed.marker'
 $NpmFlags = @('--no-fund', '--no-audit', '--no-update-notifier', '--loglevel', 'error')
 $PipFlags = @('--disable-pip-version-check', '--no-input', '--quiet')
 
@@ -446,7 +451,7 @@ function Install-RtkBashShim {
         }
         if (-not $usrBin) { return $false }
         $shimPath = Join-Path $usrBin 'rtk'
-        $shimBody = "#!/usr/bin/bash`nexec $RtkPosix `"`$@`"`n"
+        $shimBody = "#!/usr/bin/bash`nexec '$RtkPosix' `"`$@`"`n"
         $existing = if (Test-Path -LiteralPath $shimPath) { [System.IO.File]::ReadAllText($shimPath) } else { $null }
         if ($existing -ne $shimBody) {
             [System.IO.File]::WriteAllText($shimPath, $shimBody, (New-Object System.Text.UTF8Encoding($false)))
@@ -511,6 +516,15 @@ function Write-Utf8NoBom {
     }
     $encoding = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+}
+
+function Set-ClaudeInstalledMarker {
+    if ($DryRun) { return }
+    try {
+        Write-Utf8NoBom -Path $ClaudeStateMarkerPath -Content "claude-native`n"
+    } catch {
+        Write-WarnLog "Could not record the Claude install marker: $($_.Exception.Message)"
+    }
 }
 
 function Ensure-MarkdownImport {
@@ -1012,6 +1026,7 @@ function Install-ClaudeNativeCli {
     if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) {
         Throw-InstallError "Claude native installer finished, but $claudeExe was not found."
     }
+    Set-ClaudeInstalledMarker
     Write-Log 'Installed Claude Code CLI using the native installer.'
 }
 
@@ -1518,15 +1533,28 @@ function Install-ClaudeNative {
 
 function Update-ClaudeNative {
   $claudeExe = Join-Path $env:USERPROFILE '.local\bin\claude.exe'
+  $claudeMarker = Join-Path (Join-Path $env:LOCALAPPDATA 'InstallTheCli') 'claude_native_installed.marker'
   if (Test-ClaudeCliRunning) { Ensure-ClaudeNativeCommandBridge; return }
+  $legacyClaudeNpm = $false
   if ($npmPath) {
     try {
       $prefix = Get-NpmPrefix
       if ($prefix -and (Test-Path -LiteralPath (Join-Path $prefix 'node_modules\@anthropic-ai\claude-code'))) {
+        $legacyClaudeNpm = $true
         & $npmPath @NpmFlags uninstall -g '@anthropic-ai/claude-code' *>&1 | Out-Null
       }
     } catch { }
   }
+  # Only manage Claude where it was actually installed: the native exe, a legacy
+  # npm install, or the marker the installer records. Without this gate the
+  # hidden task installed Claude on machines that never asked for it, and
+  # silently re-installed it after an uninstall.
+  if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf) -and -not $legacyClaudeNpm -and
+      -not (Test-Path -LiteralPath $claudeMarker -PathType Leaf)) {
+    Write-Output 'Claude CLI is not installed on this machine; skipping Claude update.'
+    return
+  }
+  Write-Utf8NoBom $claudeMarker "claude-native`n"
   if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) {
     Install-ClaudeNative
     if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) { throw "Claude native installer did not create $claudeExe" }
@@ -1604,14 +1632,21 @@ if ($npmPath) {
   Update-NpmCli @("command-code")
 }
 
-if (Test-Cmd "py") {
-  & py -3.14 -m pip install --user --upgrade @PipFlags pip *>&1 | Out-Null
-  & py -3.14 -m pip install --user --upgrade @PipFlags uv *>&1 | Out-Null
-}
-if (Test-Cmd "uv") {
-  & uv tool install --upgrade mistral-vibe *>&1 | Out-Null
-} elseif (Test-Cmd "py") {
-  & py -3.14 -m pip install --user --upgrade @PipFlags mistral-vibe *>&1 | Out-Null
+# Only manage Mistral Vibe (and the uv it needs) when it is actually installed.
+# Ungated, this installed uv and mistral-vibe on machines that never asked for
+# them, and re-installed them after an uninstall.
+if ((Test-Cmd 'vibe') -or (Test-Cmd 'mistral-vibe')) {
+  if (Test-Cmd "py") {
+    & py -3.14 -m pip install --user --upgrade @PipFlags pip *>&1 | Out-Null
+    & py -3.14 -m pip install --user --upgrade @PipFlags uv *>&1 | Out-Null
+  }
+  if (Test-Cmd "uv") {
+    & uv tool install --upgrade mistral-vibe *>&1 | Out-Null
+  } elseif (Test-Cmd "py") {
+    & py -3.14 -m pip install --user --upgrade @PipFlags mistral-vibe *>&1 | Out-Null
+  }
+} else {
+  Write-Output 'Mistral Vibe is not installed; skipping.'
 }
 
 if (Test-Cmd "winget") {
@@ -1666,7 +1701,7 @@ function Install-RtkBashShim {
     }
     if (-not $usrBin) { return $false }
     $shimPath = Join-Path $usrBin 'rtk'
-    $shimBody = "#!/usr/bin/bash`nexec $RtkPosix `"`$@`"`n"
+    $shimBody = "#!/usr/bin/bash`nexec '$RtkPosix' `"`$@`"`n"
     $existing = if (Test-Path -LiteralPath $shimPath) { [System.IO.File]::ReadAllText($shimPath) } else { $null }
     if ($existing -ne $shimBody) {
       [System.IO.File]::WriteAllText($shimPath, $shimBody, (New-Object System.Text.UTF8Encoding($false)))

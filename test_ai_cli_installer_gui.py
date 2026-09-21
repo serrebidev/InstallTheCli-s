@@ -249,6 +249,36 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertEqual(pkg, "command-code")
         self.assertEqual(install_mock.call_args.args[1], "command-code")
 
+    def test_get_pip_version_parses_the_version_line(self) -> None:
+        ok = types.SimpleNamespace(
+            returncode=0, stdout="pip 24.0 from /usr/lib/python3/dist-packages/pip (python 3.12)\n", stderr=""
+        )
+        with patch.object(m, "_probe_command", return_value=ok):
+            self.assertEqual(m.get_pip_version(["/usr/bin/python3"]), (24, 0, 0))
+        patched = types.SimpleNamespace(returncode=0, stdout="pip 23.0.1 from /x (python 3.11)\n", stderr="")
+        with patch.object(m, "_probe_command", return_value=patched):
+            self.assertEqual(m.get_pip_version(["/usr/bin/python3"]), (23, 0, 1))
+        with patch.object(m, "_probe_command", return_value=types.SimpleNamespace(returncode=1, stdout="", stderr="")):
+            self.assertIsNone(m.get_pip_version(["/usr/bin/python3"]))
+        with patch.object(m, "_probe_command", return_value=None):
+            self.assertIsNone(m.get_pip_version(["/usr/bin/python3"]))
+
+    def test_pip_flags_only_use_flags_the_interpreter_understands(self) -> None:
+        # Old pip rejects --break-system-packages outright ("no such option"),
+        # which failed the pip self-upgrade before pip could ever be updated.
+        with patch.object(m, "is_linux", return_value=True):
+            with patch.object(m, "get_pip_version", return_value=(20, 3, 4)):
+                self.assertNotIn("--break-system-packages", m.pip_install_flags_for_platform(["/usr/bin/python3"]))
+            with patch.object(m, "get_pip_version", return_value=(23, 0, 0)):
+                self.assertNotIn("--break-system-packages", m.pip_install_flags_for_platform(["/usr/bin/python3"]))
+            with patch.object(m, "get_pip_version", return_value=(23, 0, 1)):
+                self.assertIn("--break-system-packages", m.pip_install_flags_for_platform(["/usr/bin/python3"]))
+            # An unreadable pip keeps the historical flags.
+            with patch.object(m, "get_pip_version", return_value=None):
+                self.assertIn("--break-system-packages", m.pip_install_flags_for_platform(["/usr/bin/python3"]))
+        with patch.object(m, "is_linux", return_value=False):
+            self.assertNotIn("--break-system-packages", m.pip_install_flags_for_platform(["/usr/bin/python3"]))
+
     def test_chatgpt_desktop_app_spec_uses_codex_replacement_msstore_product_id(self) -> None:
         chatgpt_app = next(spec for spec in m.GUI_APP_SPECS if spec.key == "chatgpt_app")
         self.assertEqual(chatgpt_app.winget_id, "9PLM9XGG6VKS")
@@ -2001,6 +2031,63 @@ class CommandAndDetectionTests(unittest.TestCase):
             self.assertTrue(success)
             self.assertFalse(os.path.exists(claude_exe))
             self.assertFalse(os.path.exists(bridge))
+
+    def test_claude_install_marker_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as support:
+            logs: list[str] = []
+            with patch.object(m, "get_app_support_directory", return_value=support):
+                marker = m.claude_state_marker_path()
+                self.assertFalse(os.path.exists(marker))
+                m.mark_claude_native_installed(logs.append)
+                self.assertTrue(os.path.exists(marker))
+                m.clear_claude_native_installed(logs.append)
+                self.assertFalse(os.path.exists(marker))
+                # Clearing a marker that is not there is not an error.
+                m.clear_claude_native_installed(logs.append)
+        self.assertEqual(logs, [])
+
+    def test_ensure_app_cli_records_the_claude_install_marker(self) -> None:
+        # The marker is what lets the hidden updater keep healing a real Claude
+        # install without installing Claude where it was never wanted.
+        claude = next(spec for spec in m.CLI_SPECS if spec.key == "claude")
+        with tempfile.TemporaryDirectory() as support:
+            with (
+                patch.object(m, "is_windows", return_value=True),
+                patch.object(m, "remove_legacy_claude_npm_install", return_value=False),
+                patch.object(m, "run_command", return_value=0),
+                patch.object(m, "get_app_support_directory", return_value=support),
+            ):
+                ok, pkg = m.ensure_app_cli(claude, lambda _msg: None)
+            self.assertTrue(ok)
+            self.assertEqual(pkg, "claude-code")
+            self.assertTrue(os.path.isfile(os.path.join(support, m.CLAUDE_STATE_MARKER_FILE)))
+
+    def test_antigravity_ide_detection_ignores_the_shared_antigravity_command(self) -> None:
+        # "antigravity" is also Antigravity 2.0's command, so a PATH lookup
+        # reported the IDE as installed on every machine that had 2.0.
+        spec = next(item for item in m.CLI_SPECS if item.key == "antigravity_ide")
+        is_installed = types.MethodType(m.InstallerFrame._is_cli_installed, DummyFrame())
+        with (
+            patch.object(m, "is_windows", return_value=True),
+            patch.object(m, "_winget_app_installed", return_value=False) as winget_mock,
+            patch.object(m, "resolve_command_path", return_value=r"C:\npm\antigravity.cmd") as resolve_mock,
+        ):
+            self.assertFalse(is_installed(spec, [r"C:\Users\Admin\AppData\Roaming\npm"]))
+        winget_mock.assert_called_once_with(spec.winget_id, spec.winget_source)
+        resolve_mock.assert_not_called()
+
+    def test_antigravity_ide_detection_follows_the_package_manager(self) -> None:
+        spec = next(item for item in m.CLI_SPECS if item.key == "antigravity_ide")
+        is_installed = types.MethodType(m.InstallerFrame._is_cli_installed, DummyFrame())
+        with (
+            patch.object(m, "is_windows", return_value=False),
+            patch.object(m, "is_macos", return_value=True),
+            patch.object(m, "_brew_cask_app_installed", return_value=True) as cask_mock,
+        ):
+            self.assertTrue(is_installed(spec, []))
+        cask_mock.assert_called_once_with(spec.macos_brew_cask)
+        with patch.object(m, "is_windows", return_value=False), patch.object(m, "is_macos", return_value=False):
+            self.assertFalse(is_installed(spec, []))
 
     def test_try_install_openclaw_official_macos_checks_brew_node_and_no_onboard(self) -> None:
         spec = next(spec for spec in m.CLI_SPECS if spec.key == "openclaw")
@@ -4327,8 +4414,27 @@ class RtkIntegrationTests(unittest.TestCase):
             shim_path = os.path.join(usr_bin, "rtk")
             with open(shim_path, "r", encoding="utf-8", newline="") as fh:
                 content = fh.read()
-            self.assertEqual(content, '#!/usr/bin/bash\nexec /c/Users/admin/.cargo/bin/rtk.exe "$@"\n')
+            # The POSIX path is single-quoted so a Windows profile path with a
+            # space does not split the exec line.
+            self.assertEqual(content, "#!/usr/bin/bash\nexec '/c/Users/admin/.cargo/bin/rtk.exe' \"$@\"\n")
             self.assertNotIn("\r", content, "shim must be LF-only for Git Bash")
+
+    def test_install_rtk_bash_shim_quotes_a_posix_path_with_spaces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            git_dir = os.path.join(tmp, "mingw64", "bin")
+            usr_bin = os.path.join(tmp, "usr", "bin")
+            os.makedirs(git_dir)
+            os.makedirs(usr_bin)
+            git_exe = os.path.join(git_dir, "git.exe")
+            open(git_exe, "w").close()
+            open(os.path.join(usr_bin, "bash.exe"), "w").close()
+            with patch.object(m.shutil, "which", return_value=git_exe):
+                m._install_rtk_bash_shim("/c/Users/John Smith/.cargo/bin/rtk.exe", lambda _msg: None)
+            with open(os.path.join(usr_bin, "rtk"), "r", encoding="utf-8", newline="") as fh:
+                content = fh.read()
+            self.assertEqual(
+                content, "#!/usr/bin/bash\nexec '/c/Users/John Smith/.cargo/bin/rtk.exe' \"$@\"\n"
+            )
 
     def test_install_rtk_bash_shim_returns_false_without_git(self) -> None:
         with patch.object(m.shutil, "which", return_value=None):
@@ -5165,8 +5271,51 @@ class AuditFixScriptTests(unittest.TestCase):
         # Debian 12 / Ubuntu 22.04 ship Python < 3.12, so the optional Mistral
         # Vibe CLI used to abort install-all before Ollama/Antigravity/VSCode.
         linux = self._read("install_all_linux.sh")
-        self.assertIn('install_mistral_vibe || warn "Skipping optional Mistral Vibe CLI."', linux)
+        self.assertIn('( set +e; install_mistral_vibe ) || warn "Skipping optional Mistral Vibe CLI."', linux)
         self.assertIn("Python 3.12+ is required for Mistral Vibe CLI; skipping it.", linux)
+
+    def test_linux_updater_only_touches_installed_tools(self) -> None:
+        # Ungated, the cron updater installed Ollama and Mistral Vibe on
+        # machines that never asked for them and re-created them after an
+        # uninstall.
+        linux = self._read("install_all_linux.sh")
+        self.assertIn("update_ollama() {", linux)
+        self.assertIn('if ! command_exists ollama; then', linux)
+        self.assertIn("Ollama is not installed; skipping", linux)
+        self.assertIn("if ! command_exists vibe && ! command_exists mistral-vibe; then", linux)
+        self.assertIn("Mistral Vibe is not installed; skipping", linux)
+
+    def test_linux_pip_flags_are_version_probed(self) -> None:
+        # --break-system-packages/--root-user-action do not exist on old pip, and
+        # an unknown option fails the whole install.
+        linux = self._read("install_all_linux.sh")
+        self.assertIn("set_pip_flags() {", linux)
+        self.assertIn('PIP_FLAGS=(--disable-pip-version-check --no-input --quiet)', linux)
+        self.assertNotIn("--break-system-packages --root-user-action=ignore)", linux)
+
+    def test_windows_script_gates_claude_on_an_install_marker(self) -> None:
+        windows = self._read("install_all_windows.ps1")
+        self.assertGreaterEqual(windows.count("claude_native_installed.marker"), 2)
+        self.assertIn("Claude CLI is not installed on this machine; skipping Claude update.", windows)
+        self.assertIn("$legacyClaudeNpm", windows)
+        self.assertIn("function Set-ClaudeInstalledMarker", windows)
+
+    def test_windows_script_gates_mistral_and_quotes_the_rtk_shim(self) -> None:
+        windows = self._read("install_all_windows.ps1")
+        self.assertIn("if ((Test-Cmd 'vibe') -or (Test-Cmd 'mistral-vibe')) {", windows)
+        self.assertIn("Mistral Vibe is not installed; skipping.", windows)
+        # Both shim copies must quote the POSIX path (profile paths can contain
+        # spaces, which would otherwise split the exec line).
+        self.assertEqual(windows.count("exec '$RtkPosix'"), 2)
+
+    def test_generated_windows_updater_gates_claude_on_the_marker(self) -> None:
+        # The hidden task used to install Claude unconditionally on any machine
+        # that had the task, and so re-installed it after an uninstall.
+        script = m.build_cli_auto_update_script("npm.cmd", "C:\\packages.txt")
+        self.assertIn("claude_native_installed.marker", script)
+        self.assertIn("Claude CLI is not installed on this machine; skipping Claude update.", script)
+        self.assertIn("Write-Utf8NoBom $claudeMarker", script)
+        self.assertIn("$legacyClaudeNpm", script)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -24,7 +24,7 @@ CRON_FILE_PATH="/etc/cron.d/installthecli-ai-cli-updates"
 UPDATE_LOG_PATH="/var/log/installthecli-linux-update.log"
 
 NPM_FLAGS=(--no-fund --no-audit --no-update-notifier --loglevel error)
-PIP_FLAGS=(--disable-pip-version-check --no-input --quiet --break-system-packages --root-user-action=ignore)
+PIP_FLAGS=(--disable-pip-version-check --no-input --quiet)
 
 DISTRO_FAMILY=""
 CRON_SERVICE_NAME=""
@@ -161,6 +161,31 @@ command_exists() {
 
 npm_package_installed() {
   npm ls -g --depth=0 "$1" >/dev/null 2>&1
+}
+
+# --root-user-action (pip 22.1+) and --break-system-packages (pip 23.0.1+) are
+# only understood by the pip versions that also need them, and an unknown option
+# fails the whole command. Probe the interpreter instead of passing them
+# blindly, which is what broke Mistral Vibe installs on every distro shipping an
+# older pip. An unreadable pip keeps the historical flags.
+set_pip_flags() {
+  local py="$1"
+  PIP_FLAGS=(--disable-pip-version-check --no-input --quiet)
+  local pip_version major minor patch
+  pip_version="$("$py" -m pip --version 2>/dev/null | awk '{print $2}' || true)"
+  if [[ "$pip_version" =~ ^([0-9]+)\.([0-9]+)(\.([0-9]+))? ]]; then
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    patch="${BASH_REMATCH[4]:-0}"
+    if (( major > 22 || (major == 22 && minor >= 1) )); then
+      PIP_FLAGS+=(--root-user-action=ignore)
+    fi
+    if (( major > 23 || (major == 23 && (minor > 0 || patch >= 1)) )); then
+      PIP_FLAGS+=(--break-system-packages)
+    fi
+  else
+    PIP_FLAGS+=(--root-user-action=ignore --break-system-packages)
+  fi
 }
 
 detect_distro_family() {
@@ -416,7 +441,10 @@ install_mistral_vibe() {
     return 1
   }
 
+  set_pip_flags "$PYTHON_BIN"
   run_cmd "$PYTHON_BIN" -m pip install --user --upgrade "${PIP_FLAGS[@]}" pip
+  # pip may have just been upgraded, so re-probe before using the flags on it.
+  set_pip_flags "$PYTHON_BIN"
   run_cmd "$PYTHON_BIN" -m pip install --user --upgrade "${PIP_FLAGS[@]}" uv
 
   export PATH="/root/.local/bin:${PATH}"
@@ -687,7 +715,10 @@ install_rtk() {
 install_all_targets() {
   install_claude_native
   install_all_npm_clis
-  install_mistral_vibe || warn "Skipping optional Mistral Vibe CLI."
+  # Mistral Vibe is optional and its Python/pip prerequisites are the most
+  # fragile part of the run. A subshell with errexit off means a failure here
+  # (no Python 3.12, an old pip) can never abort the rest of install-all.
+  ( set +e; install_mistral_vibe ) || warn "Skipping optional Mistral Vibe CLI."
   install_ollama_official
   install_antigravity_linux
   install_antigravity_cli_linux
@@ -749,7 +780,7 @@ OLLAMA_INSTALL_URL="https://ollama.com/install.sh"
 CLAUDE_INSTALL_URL="https://claude.ai/install.sh"
 CLAUDE_LEGACY_NPM_PACKAGE="@anthropic-ai/claude-code"
 NPM_FLAGS=(--no-fund --no-audit --no-update-notifier --loglevel error)
-PIP_FLAGS=(--disable-pip-version-check --no-input --quiet --break-system-packages --root-user-action=ignore)
+PIP_FLAGS=(--disable-pip-version-check --no-input --quiet)
 
 log() {
   printf '%s %s\n' "${LOG_PREFIX}" "$*"
@@ -771,6 +802,31 @@ run_shell() {
 
 npm_package_installed() {
   npm ls -g --depth=0 "$1" >/dev/null 2>&1
+}
+
+# --root-user-action (pip 22.1+) and --break-system-packages (pip 23.0.1+) are
+# only understood by the pip versions that also need them, and an unknown option
+# fails the whole command. Probe the interpreter instead of passing them
+# blindly, which is what broke Mistral Vibe installs on every distro shipping an
+# older pip. An unreadable pip keeps the historical flags.
+set_pip_flags() {
+  local py="$1"
+  PIP_FLAGS=(--disable-pip-version-check --no-input --quiet)
+  local pip_version major minor patch
+  pip_version="$("$py" -m pip --version 2>/dev/null | awk '{print $2}' || true)"
+  if [[ "$pip_version" =~ ^([0-9]+)\.([0-9]+)(\.([0-9]+))? ]]; then
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    patch="${BASH_REMATCH[4]:-0}"
+    if (( major > 22 || (major == 22 && minor >= 1) )); then
+      PIP_FLAGS+=(--root-user-action=ignore)
+    fi
+    if (( major > 23 || (major == 23 && (minor > 0 || patch >= 1)) )); then
+      PIP_FLAGS+=(--break-system-packages)
+    fi
+  else
+    PIP_FLAGS+=(--root-user-action=ignore --break-system-packages)
+  fi
 }
 
 update_npm_cli() {
@@ -853,13 +909,22 @@ ensure_root_symlink_if_missing() {
 }
 
 update_mistral_vibe() {
+  # Only manage Mistral Vibe when it is installed: ungated, this created it
+  # (plus uv) on machines that never asked for it, and re-created it after an
+  # uninstall.
+  if ! command_exists vibe && ! command_exists mistral-vibe; then
+    log "Mistral Vibe is not installed; skipping"
+    return 0
+  fi
   local py
   py="$(select_python || true)"
   if [[ -z "${py}" ]]; then
     log "Python 3.12+ not found; skipping Mistral Vibe update"
     return 0
   fi
+  set_pip_flags "$py"
   run_cmd "$py" -m pip install --user --upgrade "${PIP_FLAGS[@]}" pip || true
+  set_pip_flags "$py"
   run_cmd "$py" -m pip install --user --upgrade "${PIP_FLAGS[@]}" uv || true
   if command_exists uv; then
     run_cmd uv tool install --upgrade mistral-vibe || true
@@ -872,6 +937,13 @@ update_mistral_vibe() {
 }
 
 update_ollama() {
+  # Only update Ollama when it is installed: the official script installs it
+  # from scratch, so running it unconditionally added Ollama to machines that
+  # never asked for it and undid an uninstall on the next daily run.
+  if ! command_exists ollama; then
+    log "Ollama is not installed; skipping"
+    return 0
+  fi
   if ! command_exists curl; then
     log "curl not found; skipping Ollama update"
     return 0

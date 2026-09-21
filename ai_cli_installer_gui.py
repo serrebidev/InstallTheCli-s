@@ -107,10 +107,19 @@ FREEBUFF_DESKTOP_MACOS_INTEL_URL = "https://freebuff.com/api/desktop/download/ma
 FREEBUFF_DESKTOP_LINUX_URL = "https://freebuff.com/api/desktop/download/linux"
 FREEBUFF_DESKTOP_APP_NAME = "Freebuff"
 GUI_LAST_RUN_LOG_FILE = "gui_last_run.log"
+# Presence marker recorded when Claude Code is installed on this machine. The
+# hidden updater refuses to install Claude from scratch and will not resurrect
+# it after an uninstall; the marker is what lets it still self-heal a broken
+# install for users who did ask for Claude.
+CLAUDE_STATE_MARKER_FILE = "claude_native_installed.marker"
 NPM_INSTALL_MAX_ATTEMPTS = 3
 NPM_INSTALL_RETRY_DELAY_SECONDS = 2.0
 NPM_QUIET_FLAGS = ["--no-fund", "--no-audit", "--no-update-notifier", "--loglevel", "error"]
 PIP_QUIET_FLAGS = ["--disable-pip-version-check", "--no-input", "--quiet"]
+# --break-system-packages only exists from pip 23.0.1, and it is only needed on
+# PEP 668 "externally managed" systems, which are all newer than that. Handing
+# it to an older pip fails the whole command with "no such option".
+PIP_BREAK_SYSTEM_PACKAGES_VERSION = (23, 0, 1)
 MACOS_BREW_FORMULA_CLIS = ("qwen-code", "mistral-vibe", "ollama", "ironclaw")
 MACOS_BREW_CASK_CLIS = ("claude-code", "codex", "copilot-cli", "antigravity", "visual-studio-code", "antigravity-ide")
 MACOS_NPM_UPDATE_PACKAGES = (
@@ -553,9 +562,33 @@ def ensure_linux_root_for_package_installs(log: Callable[[str], None]) -> bool:
     return False
 
 
-def pip_install_flags_for_platform() -> list[str]:
+def get_pip_version(python_cmd: list[str]) -> Optional[tuple[int, int, int]]:
+    completed = _probe_command([*python_cmd, "-m", "pip", "--version"])
+    if not completed or completed.returncode != 0:
+        return None
+    match = re.match(r"pip\s+(\d+)\.(\d+)(?:\.(\d+))?", (completed.stdout or "").strip())
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
+
+
+def pip_supports_break_system_packages(python_cmd: Optional[list[str]]) -> bool:
+    """True when this interpreter's pip understands --break-system-packages.
+
+    Unknown or unreadable pip keeps the historical behaviour (flag added), so a
+    probe failure cannot silently change how installs are performed.
+    """
+    if not python_cmd:
+        return True
+    version = get_pip_version(python_cmd)
+    if version is None:
+        return True
+    return version >= PIP_BREAK_SYSTEM_PACKAGES_VERSION
+
+
+def pip_install_flags_for_platform(python_cmd: Optional[list[str]] = None) -> list[str]:
     flags = list(PIP_QUIET_FLAGS)
-    if is_linux():
+    if is_linux() and pip_supports_break_system_packages(python_cmd):
         flags.append("--break-system-packages")
     return flags
 
@@ -1210,13 +1243,26 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "}",
         "function Update-ClaudeNative {",
         "  $claudeExe = Join-Path $env:USERPROFILE '.local\\bin\\claude.exe'",
+        "  $claudeMarker = Join-Path (Join-Path $env:LOCALAPPDATA 'InstallTheCli') 'claude_native_installed.marker'",
         "  if (Test-ClaudeCliRunning) { Ensure-ClaudeNativeCommandBridge; return }",
+        "  $legacyClaudeNpm = $false",
         "  try {",
         "    $prefix = Get-NpmPrefix",
         "    if ($prefix -and (Test-Path -LiteralPath (Join-Path $prefix 'node_modules\\@anthropic-ai\\claude-code'))) {",
+        "      $legacyClaudeNpm = $true",
         f"      $null = & $npm {npm_quiet_args} 'uninstall' '-g' {claude_pkg_literal} *>&1",
         "    }",
         "  } catch { }",
+        # Only manage Claude where it was actually installed: the native exe, a
+        # legacy npm install, or the marker the installer records. Without this
+        # gate the hidden task installed Claude on machines that never asked for
+        # it, and silently re-installed it after an uninstall.
+        "  if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf) -and -not $legacyClaudeNpm -and",
+        "      -not (Test-Path -LiteralPath $claudeMarker -PathType Leaf)) {",
+        "    Write-Output 'Claude CLI is not installed on this machine; skipping Claude update.'",
+        "    return",
+        "  }",
+        "  Write-Utf8NoBom $claudeMarker \"claude-native`n\"",
         "  if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) {",
         "    Install-ClaudeNative",
         "    if (-not (Test-Path -LiteralPath $claudeExe -PathType Leaf)) { throw \"Claude native installer did not create $claudeExe\" }",
@@ -1250,7 +1296,9 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         # work. Claude is native-installed (not an npm package), so it never
         # appears in new packages files; running eagerly also migrates the
         # legacy @anthropic-ai/claude-code npm install on machines that
-        # configured this task before the native switch.
+        # configured this task before the native switch. Update-ClaudeNative
+        # skips entirely unless Claude is actually present (see its own gate),
+        # so a Codex-only machine no longer has Claude installed behind its back.
         "Update-ClaudeNative",
         f"$packagesFile = {powershell_single_quote(packages_file)}",
         "if (-not (Test-Path -LiteralPath $packagesFile)) { exit 0 }",
@@ -3122,11 +3170,13 @@ def ensure_app_cli(spec: CliSpec, log: Callable[[str], None]) -> tuple[bool, Opt
                    f"Invoke-Expression (Invoke-RestMethod '{CLAUDE_INSTALL_PS1}')"]
             code = run_command(cmd, log)
             if code == 0:
+                mark_claude_native_installed(log)
                 return (True, "claude-code")
             return (False, f"Claude native installer failed with exit code {format_exit_code(code)}")
         log("Installing Claude Code CLI via Anthropic's official install.sh...")
         code = run_command(["/bin/bash", "-c", f"curl -fsSL {CLAUDE_INSTALL_SH} | /bin/bash"], log)
         if code == 0:
+            mark_claude_native_installed(log)
             return (True, "claude-code")
         return (False, f"Claude native installer failed with exit code {format_exit_code(code)}")
 
@@ -3162,6 +3212,34 @@ def ensure_app_cli(spec: CliSpec, log: Callable[[str], None]) -> tuple[bool, Opt
     return (False, f"No macOS installer is configured for {spec.label}.")
 
 
+def claude_state_marker_path() -> str:
+    return os.path.join(get_app_support_directory(), CLAUDE_STATE_MARKER_FILE)
+
+
+def mark_claude_native_installed(log: Callable[[str], None]) -> None:
+    """Record that Claude Code was installed here.
+
+    The hidden updater only manages Claude when this marker, the native exe, or
+    a legacy npm install is present. Without it the task installed Claude on
+    machines that never asked for it, and re-installed it after an uninstall.
+    """
+    path = claude_state_marker_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        write_text_file(path, "claude-native\n")
+    except OSError as exc:
+        log(f"Warning: could not record the Claude install marker: {exc}")
+
+
+def clear_claude_native_installed(log: Callable[[str], None]) -> None:
+    try:
+        os.unlink(claude_state_marker_path())
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        log(f"Warning: could not remove the Claude install marker: {exc}")
+
+
 def claude_native_bridge_path() -> Optional[str]:
     """Path of the %APPDATA%\\npm\\claude.cmd shim that forwards to the native
     CLI, when that shim exists.
@@ -3188,6 +3266,7 @@ def claude_native_bridge_path() -> Optional[str]:
 def uninstall_app_cli(spec: CliSpec, log: Callable[[str], None]) -> tuple[bool, Optional[str]]:
     if spec.key == "claude" and not is_macos():
         remove_legacy_claude_npm_install(log)
+        clear_claude_native_installed(log)
         home = os.path.expanduser("~")
         if is_windows():
             targets = [os.path.join(home, ".local", "bin", "claude.exe")]
@@ -3382,7 +3461,7 @@ def ensure_pip3_for_python(
 
     log(f"Updating pip3 for {python_label}...")
     code = run_command(
-        [*python_cmd, "-m", "pip", "install", "--user", "--upgrade", *pip_install_flags_for_platform(), "pip"],
+        [*python_cmd, "-m", "pip", "install", "--user", "--upgrade", *pip_install_flags_for_platform(python_cmd), "pip"],
         log,
     )
     if code != 0:
@@ -3402,7 +3481,7 @@ def ensure_uv_for_mistral(python_cmd: list[str], log: Callable[[str], None]) -> 
 
     log("Updating uv for Mistral Vibe CLI...")
     code = run_command(
-        [*python_cmd, "-m", "pip", "install", "--user", "--upgrade", *pip_install_flags_for_platform(), "uv"],
+        [*python_cmd, "-m", "pip", "install", "--user", "--upgrade", *pip_install_flags_for_platform(python_cmd), "uv"],
         log,
     )
     if code != 0:
@@ -3462,7 +3541,7 @@ def try_install_mistral_vibe(
 
     log(f"Trying official Mistral Vibe install via pip: {package_name}")
     code = run_command(
-        [*python_cmd, "-m", "pip", "install", "--user", "--upgrade", *pip_install_flags_for_platform(), package_name],
+        [*python_cmd, "-m", "pip", "install", "--user", "--upgrade", *pip_install_flags_for_platform(python_cmd), package_name],
         log,
     )
     if code == 0:
@@ -3689,8 +3768,11 @@ def _install_rtk_bash_shim(rtk_posix: str, log: Callable[[str], None]) -> bool:
     if not usr_bin:
         return False
     shim_path = os.path.join(usr_bin, "rtk")
-    # LF-only bash script (newline="" keeps Windows from writing CRLF).
-    shim_body = f'#!/usr/bin/bash\nexec {rtk_posix} "$@"\n'
+    # LF-only bash script (newline="" keeps Windows from writing CRLF). The
+    # POSIX path is single-quoted: Windows profile paths can contain spaces,
+    # which would otherwise split the exec line and break the hook.
+    quoted_posix = "'" + rtk_posix + "'"
+    shim_body = f'#!/usr/bin/bash\nexec {quoted_posix} "$@"\n'
     try:
         existing = None
         if os.path.isfile(shim_path):
@@ -3844,7 +3926,7 @@ def try_uninstall_mistral_vibe(
                 "pip",
                 "uninstall",
                 "--yes",
-                *pip_install_flags_for_platform(),
+                *pip_install_flags_for_platform(python_cmd),
                 package_name,
             ],
             log,
@@ -4230,6 +4312,26 @@ def _brew_cask_app_installed(cask_name: str) -> bool:
     return brew_package_installed(brew, cask_name, cask=True)
 
 
+def app_cli_installed_via_package_manager(spec: CliSpec) -> bool:
+    """True when an IDE-style CLI is registered with winget/Homebrew.
+
+    Used for specs whose command name is shared with another product, where a
+    PATH lookup reports a false positive (the Antigravity IDE ships no command
+    of its own and would otherwise read as installed as soon as Antigravity 2.0
+    is present). Package-manager registration is the authoritative signal for
+    these, and the IDE does not exist on Linux at all.
+    """
+    if is_windows():
+        if spec.winget_id:
+            return _winget_app_installed(spec.winget_id, spec.winget_source)
+        return False
+    if is_macos():
+        if spec.macos_brew_cask:
+            return _brew_cask_app_installed(spec.macos_brew_cask)
+        return False
+    return False
+
+
 def _gui_app_direct_url_for_platform(spec: GuiAppSpec) -> Optional[str]:
     """The direct-download installer URL for the running platform, if the spec
     has one. macOS picks the Intel build on x86_64 when a separate one exists."""
@@ -4595,7 +4697,7 @@ def _uninstall_gui_app_browser_shortcut(spec: GuiAppSpec, log: Callable[[str], N
             log(f"Removed browser shortcut: {path}")
         except OSError as exc:
             log(f"Warning: failed to remove browser shortcut {path}: {exc}")
-            return False
+            continue
     if is_linux() and removed_any:
         update_desktop_database_for_user(log)
     return True
@@ -5233,6 +5335,11 @@ class InstallerFrame(wx.Frame):
     def _is_cli_installed(self, spec: CliSpec, cli_dirs: Optional[list[str]] = None) -> bool:
         if spec.key == "ollama":
             return bool(find_ollama())
+        if spec.key == "antigravity_ide":
+            # The IDE has no command of its own; its "antigravity" candidate is
+            # also Antigravity 2.0's command, so a PATH lookup reported the IDE
+            # as installed on every machine that had 2.0.
+            return app_cli_installed_via_package_manager(spec)
         dirs = cli_dirs if cli_dirs is not None else self._get_cli_detection_dirs()
         return bool(resolve_command_path(spec.command_candidates, dirs))
 
