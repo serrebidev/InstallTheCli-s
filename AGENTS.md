@@ -35,6 +35,10 @@ You should not need to open `build.bat` to cut a release — everything operatio
 - When it exits 0, the release is published as Latest/non-draft, the Windows assets
   are attached, and the Linux CI asset is confirmed on the release.
 
+### Cloud path (cloud agents ONLY)
+- On this Windows host always use `.uild.bat release`.
+- Cloud agents: `.github/workflows/cloud-release.yml` runs the same `build.bat` on a GitHub Windows runner. `gh workflow run cloud-release.yml -f dry_run=true` builds Windows and runs `linux-build.yml`/`macos-build.yml` on master, publishing nothing. `-f dry_run=false` runs `build.bat release`; with `GITHUB_ACTIONS` set, build.bat dispatches the Linux and macOS workflows on the new tag (a GITHUB_TOKEN-created tag starts no workflows), then waits on the Linux asset as usual. Watch: `gh run watch <id> --exit-status`. Never run both paths at once: both bump from the latest tag.
+
 ### `build.bat` modes
 - `release` — full release, in order: compute next version → `build_exe.bat` →
   stage versioned EXE/ZIP + SHA256SUMS + the three one-click scripts under

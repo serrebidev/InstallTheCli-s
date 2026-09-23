@@ -46,6 +46,9 @@ call "%~dp0build_exe.bat" || goto :error
 call :stage_assets || goto :error
 call :tag_and_push || goto :error
 call :publish_release || goto :error
+REM On a GitHub runner (cloud-release.yml) the tag was made with GITHUB_TOKEN,
+REM whose events never start other workflows: start the tag builds directly.
+if defined GITHUB_ACTIONS call :dispatch_platform_builds || goto :error
 call :wait_for_linux_remote_build || goto :error
 
 echo [release] Published v%NEXT_VERSION%.
@@ -119,6 +122,12 @@ REM tag never appears on origin without a release for the CI workflows to
 REM upload their assets to. If publish fails, no remote tag is left behind.
 exit /b 0
 
+:dispatch_platform_builds
+for %%W in (linux-build.yml macos-build.yml) do (
+    gh workflow run %%W --repo "%GITHUB_REPO_SLUG%" --ref "v%NEXT_VERSION%" || exit /b 1
+)
+exit /b 0
+
 :publish_release
 echo [release] Creating GitHub release v%NEXT_VERSION%...
 gh release create "v%NEXT_VERSION%" ^
@@ -164,7 +173,7 @@ set /a "FIND_ATTEMPT=FIND_ATTEMPT+1"
 REM gh run list is newest-first; keep only the first match so a re-tag/re-run
 REM doesn't latch onto a stale older run (the for loop would otherwise end on
 REM the last/oldest line).
-for /f "delims=" %%I in ('gh run list --repo "%GITHUB_REPO_SLUG%" --workflow=linux-build.yml --event=push --limit 20 --json databaseId^,headBranch --jq ".[] | select(.headBranch == \"v%NEXT_VERSION%\") | .databaseId" 2^>nul') do if not defined LINUX_RUN_ID set "LINUX_RUN_ID=%%I"
+for /f "delims=" %%I in ('gh run list --repo "%GITHUB_REPO_SLUG%" --workflow=linux-build.yml --limit 20 --json databaseId^,headBranch --jq ".[] | select(.headBranch == \"v%NEXT_VERSION%\") | .databaseId" 2^>nul') do if not defined LINUX_RUN_ID set "LINUX_RUN_ID=%%I"
 if not defined LINUX_RUN_ID (
     if %FIND_ATTEMPT% lss 6 (
         echo [release] Linux workflow run not visible yet ^(attempt %FIND_ATTEMPT%/6^), retrying in 10s...

@@ -1,0 +1,99 @@
+name: Cloud Release
+
+# Cloud agents ONLY. On the Windows release host run `.\build.bat release`.
+# Windows runs the same build.bat on a GitHub runner (version, assets, tag,
+# Latest release). Because a GITHUB_TOKEN tag starts no workflows, build.bat
+# dispatches linux-build.yml and macos-build.yml on the new tag when
+# GITHUB_ACTIONS is set, then gates on the Linux asset exactly as locally.
+#
+#   gh workflow run cloud-release.yml -f dry_run=true    # build all, publish nothing
+#   gh workflow run cloud-release.yml -f dry_run=false   # real release
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build every platform as workflow artifacts; push, tag and publish nothing
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Require master
+        if: ${{ github.ref != 'refs/heads/master' }}
+        run: |
+          echo "::error::Cloud releases run from master only (got ${{ github.ref }})."
+          exit 1
+
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: python -m pip install pyinstaller pytest -r requirements.txt
+
+      - name: Test
+        run: python -m pytest -q test_ai_cli_installer_gui.py
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Dry run
+        if: ${{ inputs.dry_run }}
+        shell: cmd
+        run: |
+          call build.bat dry-run || exit /b 1
+          call build.bat build
+
+      - name: Release
+        if: ${{ !inputs.dry_run }}
+        shell: cmd
+        run: call build.bat release
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: InstallTheCli-windows
+          path: dist/InstallTheCli.exe
+          if-no-files-found: error
+
+  # Dry run only: the real release builds these on the tag via build.bat.
+  unix:
+    if: ${{ inputs.dry_run }}
+    needs: windows
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Run the Linux and macOS builds on master and wait
+        run: |
+          set -euo pipefail
+          for wf in linux-build.yml macos-build.yml; do
+            gh workflow run "$wf" --repo "$GITHUB_REPOSITORY" --ref master
+          done
+          sleep 15
+          for wf in linux-build.yml macos-build.yml; do
+            id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$wf" --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')"
+            echo "$wf -> https://github.com/$GITHUB_REPOSITORY/actions/runs/$id"
+            gh run watch "$id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 30
+          done
