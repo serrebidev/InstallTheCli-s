@@ -125,8 +125,10 @@ jobs:
             dist/InstallTheCli-linux-SHA256SUMS.txt
           if-no-files-found: error
 
+      # Only cloud-release.yml's dispatch attaches; a host release builds
+      # Linux over SSH (tools/build_linux_remote.sh) and its tag push only tests.
       - name: Attach Linux artifact to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

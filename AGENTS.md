@@ -32,12 +32,12 @@ You should not need to open `build.bat` to cut a release — everything operatio
   Do not hand-pick the version, tag manually, or run `gh release create` yourself.
 - It requires a CLEAN tree (no uncommitted tracked changes, nothing staged). Commit first.
 - Release from `master`; `master` is the default branch.
-- When it exits 0, the release is published as Latest/non-draft, the Windows assets
-  are attached, and the Linux CI asset is confirmed on the release.
+- When it exits 0, the release is published as Latest/non-draft, the Windows and Linux
+  assets are attached; the macOS workflow attaches its own.
 
-### Cloud path (cloud agents ONLY)
-- On this Windows host always use `.uild.bat release`.
-- Cloud agents: `.github/workflows/cloud-release.yml` runs the same `build.bat` on a GitHub Windows runner. `gh workflow run cloud-release.yml -f dry_run=true` builds Windows and runs `linux-build.yml`/`macos-build.yml` on master, publishing nothing. `-f dry_run=false` runs `build.bat release`; with `GITHUB_ACTIONS` set, build.bat dispatches the Linux and macOS workflows on the new tag (a GITHUB_TOKEN-created tag starts no workflows), then waits on the Linux asset as usual. Watch: `gh run watch <id> --exit-status`. Never run both paths at once: both bump from the latest tag.
+### Cloud path (Muse agent and cloud agents ONLY)
+- On this Windows host always use `.\build.bat release`: Windows builds locally, the tag push starts `macos-build.yml` (macOS on a GitHub runner), and Linux builds over `ssh root@serrebiradio.com` with `tools/build_linux_remote.sh` (throwaway ubuntu:24.04 container; `LINUX_BUILD_HOST` overrides), then uploads. `linux-build.yml` still tests the tag but attaches only when dispatched (the cloud path). Never use cloud-release.yml from this host.
+- Muse agent and cloud agents: `.github/workflows/cloud-release.yml` runs the same `build.bat` on a GitHub Windows runner. `gh workflow run cloud-release.yml -f dry_run=true` builds Windows and runs `linux-build.yml`/`macos-build.yml` on master, publishing nothing. `-f dry_run=false` runs `build.bat release`; with `GITHUB_ACTIONS` set, build.bat dispatches the Linux and macOS workflows on the new tag (a GITHUB_TOKEN-created tag starts no workflows), then waits on the Linux asset as usual. Watch: `gh run watch <id> --exit-status`. Never run both paths at once: both bump from the latest tag.
 
 ### `build.bat` modes
 - `release` — full release, in order: compute next version → `build_exe.bat` →

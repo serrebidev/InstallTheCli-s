@@ -47,9 +47,15 @@ call :stage_assets || goto :error
 call :tag_and_push || goto :error
 call :publish_release || goto :error
 REM On a GitHub runner (cloud-release.yml) the tag was made with GITHUB_TOKEN,
-REM whose events never start other workflows: start the tag builds directly.
-if defined GITHUB_ACTIONS call :dispatch_platform_builds || goto :error
-call :wait_for_linux_remote_build || goto :error
+REM whose events never start other workflows: start the tag builds directly
+REM and wait for linux-build.yml's asset. On the Windows host the tag push
+REM starts macos-build.yml, and Linux is built over SSH.
+if defined GITHUB_ACTIONS (
+    call :dispatch_platform_builds || goto :error
+    call :wait_for_linux_remote_build || goto :error
+) else (
+    call :build_linux_over_ssh || goto :error
+)
 
 echo [release] Published v%NEXT_VERSION%.
 popd
@@ -120,6 +126,19 @@ REM NOTE: we deliberately do NOT push the tag here. gh release create creates
 REM the tag (at REL_SHA) together with the release in :publish_release, so the
 REM tag never appears on origin without a release for the CI workflows to
 REM upload their assets to. If publish fails, no remote tag is left behind.
+exit /b 0
+
+:build_linux_over_ssh
+if not defined LINUX_BUILD_HOST set "LINUX_BUILD_HOST=root@serrebiradio.com"
+echo [release] Building Linux on %LINUX_BUILD_HOST% over SSH...
+ssh -o BatchMode=yes %LINUX_BUILD_HOST% bash -s -- v%NEXT_VERSION% < "%~dp0tools\build_linux_remote.sh" > "%RELEASE_DIR%\linux_remote_dir.txt" || exit /b 1
+set "LINUX_REMOTE_DIR="
+for /f "usebackq delims=" %%D in ("%RELEASE_DIR%\linux_remote_dir.txt") do set "LINUX_REMOTE_DIR=%%D"
+if not defined LINUX_REMOTE_DIR exit /b 1
+scp -o BatchMode=yes "%LINUX_BUILD_HOST%:%LINUX_REMOTE_DIR%/*" "%RELEASE_DIR%\" || exit /b 1
+ssh -o BatchMode=yes %LINUX_BUILD_HOST% "rm -rf -- %LINUX_REMOTE_DIR%/.."
+gh release upload "v%NEXT_VERSION%" "%RELEASE_DIR%\InstallTheCli-v%NEXT_VERSION%-linux.tar.gz" "%RELEASE_DIR%\InstallTheCli-v%NEXT_VERSION%-linux-SHA256SUMS.txt" --repo "%GITHUB_REPO_SLUG%" --clobber || exit /b 1
+echo [release] Linux artifact attached to v%NEXT_VERSION%.
 exit /b 0
 
 :dispatch_platform_builds
