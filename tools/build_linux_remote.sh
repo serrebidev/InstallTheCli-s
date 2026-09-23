@@ -17,7 +17,7 @@ docker run --rm -e TAG="$tag" -v "$work/src:/src" -w /src ubuntu:24.04 bash -c '
   set -e
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y -qq --no-install-recommends python3 python3-venv python3-pip python3-wxgtk4.0 \
+  apt-get install -y -qq --no-install-recommends python3 python3-venv python3-pip python3-wxgtk4.0 libpython3.12 git \
     binutils libgtk-3-0 libsdl2-2.0-0 libnotify4 libsm6 libxtst6 libgl1 libegl1 libglib2.0-0 >/dev/null
   python3 -m venv --system-site-packages /venv
   /venv/bin/pip install -q pyinstaller
