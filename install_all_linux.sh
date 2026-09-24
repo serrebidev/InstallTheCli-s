@@ -67,7 +67,7 @@ This script installs:
   - Node.js + npm (distro package manager)
   - Claude CLI (Anthropic's official native installer, claude.ai/install.sh)
   - Codex CLI, Grok CLI, Qwen CLI, GitHub Copilot CLI,
-    OpenClaw CLI, IronClaw CLI, Freebuff CLI, Command Code CLI (npm)
+    Freebuff CLI, Command Code CLI (npm)
   - Mistral Vibe CLI (Python 3.12+ + pip/uv)
   - Ollama (official install script)
   - Antigravity (official tar.gz from antigravity.google) and Visual Studio Code
@@ -89,8 +89,6 @@ Supported targets:
   grok
   qwen
   copilot
-  openclaw
-  ironclaw
   freebuff
   commandcode
   mistral
@@ -100,7 +98,6 @@ Supported targets:
 
 Examples:
   ./install_all_linux.sh install codex
-  ./install_all_linux.sh install openclaw
   ./install_all_linux.sh install mistral --no-cron
   ./install_all_linux.sh install rtk
   ./install_all_linux.sh install-all --cron-time "15 2 * * *"
@@ -300,15 +297,15 @@ install_base_dependencies() {
 }
 
 # Distro nodejs packages can be well behind current (e.g. Node 18 on Debian
-# stable). Several CLIs require newer Node (Codex/Grok need 20+, OpenClaw and
-# Command Code need 22+), so warn rather than fail silently when the installed
+# stable). Several CLIs require newer Node (Codex/Grok need 20+,
+# Command Code needs 22+), so warn rather than fail silently when the installed
 # node is too old.
 warn_if_node_too_old() {
   command_exists node || return 0
   local major
   major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
   if [[ "$major" =~ ^[0-9]+$ ]] && (( major < 20 )); then
-    warn "Node.js $(node -v 2>/dev/null) is older than v20. Codex/Grok need Node 20+ and OpenClaw/Command Code need 22+; those CLIs may fail to install or run. Install a newer Node (e.g. via NodeSource or nvm) and re-run."
+    warn "Node.js $(node -v 2>/dev/null) is older than v20. Codex/Grok need Node 20+ and Command Code needs 22+; those CLIs may fail to install or run. Install a newer Node (e.g. via NodeSource or nvm) and re-run."
   fi
 }
 
@@ -408,8 +405,6 @@ install_all_npm_clis() {
   install_npm_cli "Grok CLI (Vibe Kit)" "@vibe-kit/grok-cli"
   install_npm_cli "Qwen CLI" "@qwen-code/qwen-code" "qwen-code"
   install_npm_cli "GitHub Copilot CLI" "@github/copilot" "@githubnext/github-copilot-cli"
-  install_npm_cli "OpenClaw CLI" "openclaw"
-  install_npm_cli "IronClaw CLI" "ironclaw"
   install_npm_cli "Freebuff CLI" "freebuff"
   install_npm_cli "Command Code CLI" "command-code"
 }
@@ -421,8 +416,6 @@ install_npm_target() {
     grok) install_npm_cli "Grok CLI (Vibe Kit)" "@vibe-kit/grok-cli" ;;
     qwen) install_npm_cli "Qwen CLI" "@qwen-code/qwen-code" "qwen-code" ;;
     copilot) install_npm_cli "GitHub Copilot CLI" "@github/copilot" "@githubnext/github-copilot-cli" ;;
-    openclaw) install_npm_cli "OpenClaw CLI" "openclaw" ;;
-    ironclaw) install_npm_cli "IronClaw CLI" "ironclaw" ;;
     freebuff) install_npm_cli "Freebuff CLI" "freebuff" ;;
     commandcode|command-code|cmdc) install_npm_cli "Command Code CLI" "command-code" ;;
     *)
@@ -755,7 +748,7 @@ install_single_target() {
     claude)
       install_claude_native
       ;;
-    codex|grok|qwen|copilot|openclaw|ironclaw|freebuff|commandcode|command-code|cmdc)
+    codex|grok|qwen|copilot|freebuff|commandcode|command-code|cmdc)
       install_npm_target "$target_key"
       ;;
     *)
@@ -876,8 +869,6 @@ update_npm_all() {
   update_npm_cli "Grok CLI (Vibe Kit)" "@vibe-kit/grok-cli"
   update_npm_cli "Qwen CLI" "@qwen-code/qwen-code" "qwen-code"
   update_npm_cli "GitHub Copilot CLI" "@github/copilot" "@githubnext/github-copilot-cli"
-  update_npm_cli "OpenClaw CLI" "openclaw"
-  update_npm_cli "IronClaw CLI" "ironclaw"
   update_npm_cli "Freebuff CLI" "freebuff"
   update_npm_cli "Command Code CLI" "command-code"
 }
@@ -1127,7 +1118,7 @@ parse_args() {
     help)
       SUBCOMMAND="help"
       ;;
-    claude|codex|antigravity|antigravity_cli|antigravity_ide|agy|vscode|code|grok|qwen|copilot|openclaw|ironclaw|freebuff|commandcode|command-code|cmdc|mistral|mistral-vibe|vibe|ollama|rtk|all)
+    claude|codex|antigravity|antigravity_cli|antigravity_ide|agy|vscode|code|grok|qwen|copilot|freebuff|commandcode|command-code|cmdc|mistral|mistral-vibe|vibe|ollama|rtk|all)
       # Convenience alias: treat first positional target as "install <target>"
       SUBCOMMAND="install"
       TARGET="${positional[0],,}"
@@ -1197,7 +1188,7 @@ main() {
   if [[ "$SUBCOMMAND" == "setup-cron" ]]; then
     log "Cron updater is configured."
   else
-    log "Open a new shell and run: cmd, claude, codex, antigravity, code, grok, qwen, copilot, openclaw, ironclaw, freebuff, vibe, ollama"
+    log "Open a new shell and run: cmd, claude, codex, antigravity, code, grok, qwen, copilot, freebuff, vibe, ollama"
   fi
 }
 

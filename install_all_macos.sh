@@ -9,7 +9,6 @@ SUBCOMMAND="install-all"
 TARGET="all"
 
 HOMEBREW_INSTALL_URL="https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
-OPENCLAW_INSTALL_URL="https://openclaw.ai/install.sh"
 SUPPORT_DIR="${HOME}/Library/Application Support/InstallTheCli"
 UPDATE_SCRIPT_PATH="${SUPPORT_DIR}/auto_update_clis_macos.sh"
 LAUNCH_AGENT_ID="com.installthecli.ai-cli-updates"
@@ -54,9 +53,8 @@ Options:
 This script installs:
   - Homebrew if missing and you approve it
   - Claude CLI, Codex CLI, Antigravity, Visual Studio Code, Qwen CLI,
-    GitHub Copilot CLI, Mistral Vibe CLI, Ollama CLI, IronClaw CLI (Homebrew)
+    GitHub Copilot CLI, Mistral Vibe CLI, Ollama CLI (Homebrew)
   - Grok CLI, Freebuff CLI, Command Code CLI (npm, with Node.js installed by Homebrew if needed)
-  - OpenClaw CLI (official installer, with Node.js 22.14+ installed by Homebrew if needed)
   - RTK (Rust Token Killer) from git master via cargo (opt-in: 'install rtk')
   - launchd updater (RunAtLoad and daily) unless --no-launch-agent is used
 EOF
@@ -74,8 +72,6 @@ Supported targets:
   grok
   qwen
   copilot
-  openclaw
-  ironclaw
   freebuff
   commandcode
   mistral
@@ -85,7 +81,6 @@ Supported targets:
 
 Examples:
   ./install_all_macos.sh install codex
-  ./install_all_macos.sh install openclaw
   ./install_all_macos.sh install mistral --no-launch-agent
   ./install_all_macos.sh install rtk
   ./install_all_macos.sh install-all
@@ -266,12 +261,6 @@ install_npm_cli() {
   die "Failed to install ${label} via npm."
 }
 
-install_openclaw_official() {
-  ensure_node 22 14
-  log "Installing OpenClaw with the official installer."
-  run_shell "curl -fsSL ${OPENCLAW_INSTALL_URL} | bash -s -- --no-onboard"
-}
-
 install_all_targets() {
   brew_install_cask claude-code
   brew_install_cask codex
@@ -283,8 +272,6 @@ install_all_targets() {
   install_npm_cli "Grok CLI (Vibe Kit)" 20 "@vibe-kit/grok-cli"
   brew_install_formula qwen-code
   brew_install_cask copilot-cli
-  install_openclaw_official
-  brew_install_formula ironclaw
   install_npm_cli "Freebuff CLI" 16 "freebuff"
   # Command Code needs Node 22+; ensure_node upgrades Homebrew node when it is older.
   install_npm_cli "Command Code CLI" 22 "command-code"
@@ -412,8 +399,6 @@ install_single_target() {
     grok) install_npm_cli "Grok CLI (Vibe Kit)" 20 "@vibe-kit/grok-cli" ;;
     qwen) brew_install_formula qwen-code ;;
     copilot) brew_install_cask copilot-cli ;;
-    openclaw) install_openclaw_official ;;
-    ironclaw) brew_install_formula ironclaw ;;
     freebuff) install_npm_cli "Freebuff CLI" 16 "freebuff" ;;
     commandcode|command-code|cmdc) install_npm_cli "Command Code CLI" 22 "command-code" ;;
     mistral|mistral-vibe|vibe) brew_install_formula mistral-vibe ;;
@@ -481,7 +466,6 @@ if [[ -n "$brew_bin" ]]; then
   update_brew_package formula qwen-code
   update_brew_package formula mistral-vibe
   update_brew_package formula ollama
-  update_brew_package formula ironclaw
   update_brew_package cask claude-code
   update_brew_package cask codex
   update_brew_package cask copilot-cli
@@ -491,7 +475,6 @@ if [[ -n "$brew_bin" ]]; then
 fi
 
 update_npm_package "@vibe-kit/grok-cli"
-update_npm_package "openclaw"
 update_npm_package "freebuff"
 update_npm_package "command-code"
 
@@ -636,7 +619,7 @@ parse_args() {
     help)
       SUBCOMMAND="help"
       ;;
-    claude|codex|antigravity|antigravity_cli|antigravity_ide|agy|vscode|code|grok|qwen|copilot|openclaw|ironclaw|freebuff|commandcode|command-code|cmdc|mistral|mistral-vibe|vibe|ollama|rtk|all)
+    claude|codex|antigravity|antigravity_cli|antigravity_ide|agy|vscode|code|grok|qwen|copilot|freebuff|commandcode|command-code|cmdc|mistral|mistral-vibe|vibe|ollama|rtk|all)
       SUBCOMMAND="install"
       TARGET="$command_name"
       ;;
@@ -696,7 +679,7 @@ main() {
   if [[ "$SUBCOMMAND" == "setup-launch-agent" ]]; then
     log "launchd updater is configured."
   else
-    log "Open a new shell and run: cmd, claude, codex, antigravity, code, grok, qwen, copilot, openclaw, ironclaw, freebuff, vibe, ollama"
+    log "Open a new shell and run: cmd, claude, codex, antigravity, code, grok, qwen, copilot, freebuff, vibe, ollama"
   fi
 }
 
