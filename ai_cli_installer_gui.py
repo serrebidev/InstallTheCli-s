@@ -63,7 +63,6 @@ VSCODE_LINUX_DEB_URL = "https://code.visualstudio.com/sha/download?build=stable&
 VSCODE_LINUX_RPM_URL = "https://code.visualstudio.com/sha/download?build=stable&os=linux-rpm-x64"
 VSCODE_LINUX_TARBALL_URL = "https://code.visualstudio.com/sha/download?build=stable&os=linux-x64"
 LINUX_OLLAMA_INSTALL_URL = "https://ollama.com/install.sh"
-OPENCLAW_INSTALL_URL = "https://openclaw.ai/install.sh"
 HOMEBREW_INSTALL_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
 RUSTUP_INIT_URL = "https://sh.rustup.rs"
 RUSTUP_WINGET_ID = "Rustlang.Rustup"
@@ -90,7 +89,6 @@ CLAUDE_LEGACY_NPM_PACKAGE = "@anthropic-ai/claude-code"
 CLAUDE_INSTALL_PS1 = "https://claude.ai/install.ps1"
 CLAUDE_INSTALL_SH = "https://claude.ai/install.sh"
 GROK_NPM_PACKAGE = "@vibe-kit/grok-cli"
-OPENCLAW_NPM_PACKAGE = "openclaw"
 FREEBUFF_NPM_PACKAGE = "freebuff"
 # Command Code installs the `cmd` CLI, but npm also registers collision-free
 # aliases (`cmdc`, `command-code`) in the same bin directory. We detect and
@@ -120,11 +118,10 @@ PIP_QUIET_FLAGS = ["--disable-pip-version-check", "--no-input", "--quiet"]
 # PEP 668 "externally managed" systems, which are all newer than that. Handing
 # it to an older pip fails the whole command with "no such option".
 PIP_BREAK_SYSTEM_PACKAGES_VERSION = (23, 0, 1)
-MACOS_BREW_FORMULA_CLIS = ("qwen-code", "mistral-vibe", "ollama", "ironclaw")
+MACOS_BREW_FORMULA_CLIS = ("qwen-code", "mistral-vibe", "ollama")
 MACOS_BREW_CASK_CLIS = ("claude-code", "codex", "copilot-cli", "antigravity", "visual-studio-code", "antigravity-ide")
 MACOS_NPM_UPDATE_PACKAGES = (
     GROK_NPM_PACKAGE,
-    OPENCLAW_NPM_PACKAGE,
     FREEBUFF_NPM_PACKAGE,
     COMMAND_CODE_NPM_PACKAGE,
 )
@@ -322,28 +319,6 @@ CLI_SPECS: tuple[CliSpec, ...] = (
         command_candidates=("copilot", "github-copilot-cli", "github-copilot"),
         shortcut_name="GitHub Copilot CLI",
         macos_brew_cask="copilot-cli",
-    ),
-    CliSpec(
-        key="openclaw",
-        label="OpenClaw CLI",
-        help_text="Installs OpenClaw AI CLI from npm (Node 22+ required).",
-        package_candidates=("openclaw",),
-        command_candidates=("openclaw",),
-        shortcut_name="OpenClaw CLI",
-        macos_official_install_url=OPENCLAW_INSTALL_URL,
-        macos_requires_node_major=22,
-        macos_requires_node_version=(22, 14, 0),
-        optional=True,
-    ),
-    CliSpec(
-        key="ironclaw",
-        label="IronClaw CLI",
-        help_text="Installs IronClaw CLI (macOS: Homebrew formula; Windows/Linux: npm fallback, Node 22+ required).",
-        package_candidates=("ironclaw",),
-        command_candidates=("ironclaw",),
-        shortcut_name="IronClaw CLI",
-        macos_brew_formula="ironclaw",
-        optional=True,
     ),
     CliSpec(
         key="freebuff",
@@ -1087,7 +1062,7 @@ function Unblock-WindowsCliFiles {
     if (-not ($dir -and (Test-Path -LiteralPath $dir -PathType Container))) { continue }
     try {
       Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Extension -in @('.ps1','.cmd','.bat','.exe') -or $_.Name -match '^(codex|claude|agy|rtk|grok|qwen|copilot|github-copilot|openclaw|ironclaw|mistral-vibe|vibe)(\..*)?$' } |
+        Where-Object { $_.Extension -in @('.ps1','.cmd','.bat','.exe') -or $_.Name -match '^(codex|claude|agy|rtk|grok|qwen|copilot|github-copilot|mistral-vibe|vibe)(\..*)?$' } |
         ForEach-Object { Unblock-File -LiteralPath $_.FullName -ErrorAction SilentlyContinue }
     } catch { }
   }
@@ -4823,21 +4798,6 @@ def try_install_package_candidates(
     return (False, last_error)
 
 
-def try_install_openclaw_official_macos(
-    spec: CliSpec,
-    log: Callable[[str], None],
-) -> tuple[bool, Optional[str]]:
-    ensure_homebrew(log)
-    required = spec.macos_requires_node_version or (spec.macos_requires_node_major or 22, 0, 0)
-    ensure_node_via_brew(log, required[0], min_version=required)
-    url = spec.macos_official_install_url or OPENCLAW_INSTALL_URL
-    log("Installing OpenClaw using the official macOS/Linux installer...")
-    code = run_command(["/bin/bash", "-c", f"curl -fsSL {url} | /bin/bash -s -- --no-onboard"], log)
-    if code == 0:
-        return (True, OPENCLAW_NPM_PACKAGE)
-    return (False, f"OpenClaw official installer failed with exit code {format_exit_code(code)}")
-
-
 def try_install_macos_cli(
     spec: CliSpec,
     log: Callable[[str], None],
@@ -4847,8 +4807,6 @@ def try_install_macos_cli(
             return brew_install_or_upgrade(spec.macos_brew_cask, log, cask=True)
         if spec.macos_brew_formula:
             return brew_install_or_upgrade(spec.macos_brew_formula, log, cask=False)
-        if spec.macos_official_install_url:
-            return try_install_openclaw_official_macos(spec, log)
         if spec.macos_requires_node_major:
             required = spec.macos_requires_node_version or (spec.macos_requires_node_major, 0, 0)
             ensure_node_via_brew(log, required[0], min_version=required)

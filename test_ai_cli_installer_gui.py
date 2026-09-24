@@ -300,10 +300,6 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertEqual(by_key["vscode"].linux_install_kind, "vscode_pkg")
         self.assertEqual(by_key["qwen"].macos_brew_formula, "qwen-code")
         self.assertEqual(by_key["copilot"].macos_brew_cask, "copilot-cli")
-        self.assertEqual(by_key["openclaw"].macos_official_install_url, m.OPENCLAW_INSTALL_URL)
-        self.assertEqual(by_key["openclaw"].macos_requires_node_major, 22)
-        self.assertEqual(by_key["openclaw"].macos_requires_node_version, (22, 14, 0))
-        self.assertEqual(by_key["ironclaw"].macos_brew_formula, "ironclaw")
 
         apps = {spec.key: spec for spec in m.GUI_APP_SPECS}
         self.assertEqual(apps["claude_app"].macos_brew_cask, "claude")
@@ -644,16 +640,11 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("brew_install_formula mistral-vibe", script)
         self.assertIn("brew_install_formula ollama", script)
         self.assertIn("install_npm_cli \"Grok CLI (Vibe Kit)\" 20", script)
-        self.assertIn("install_openclaw_official", script)
-        self.assertIn("brew_install_formula ironclaw", script)
         self.assertIn("node_satisfies()", script)
-        self.assertIn("ensure_node 22 14", script)
         self.assertIn("setup-launch-agent", script)
         self.assertIn("launchctl bootstrap", script)
         self.assertIn("update_brew_package cask codex", script)
         self.assertIn("update_npm_package \"@vibe-kit/grok-cli\"", script)
-        self.assertIn("update_npm_package \"openclaw\"", script)
-        self.assertIn("update_brew_package formula ironclaw", script)
         self.assertIn("lower()", script)
         self.assertNotIn("${answer,,}", script)
         self.assertNotIn("${positional[0],,}", script)
@@ -670,7 +661,7 @@ class UtilityFunctionTests(unittest.TestCase):
         self.assertIn("Get-Help .\\install_all_windows.ps1 -Detailed", script)
         self.assertIn("install-all", script)
         self.assertIn("install <target>", script)
-        self.assertIn("copilot/openclaw/ironclaw/freebuff/commandcode/mistral", script)
+        self.assertIn("copilot/freebuff/commandcode/mistral", script)
         self.assertIn("setup-updater", script)
         self.assertIn("--no-update-notifier", script)
         self.assertIn("--include=optional", script)
@@ -2089,22 +2080,6 @@ class CommandAndDetectionTests(unittest.TestCase):
         with patch.object(m, "is_windows", return_value=False), patch.object(m, "is_macos", return_value=False):
             self.assertFalse(is_installed(spec, []))
 
-    def test_try_install_openclaw_official_macos_checks_brew_node_and_no_onboard(self) -> None:
-        spec = next(spec for spec in m.CLI_SPECS if spec.key == "openclaw")
-        with (
-            patch.object(m, "ensure_homebrew") as brew_mock,
-            patch.object(m, "ensure_node_via_brew") as node_mock,
-            patch.object(m, "run_command", return_value=0) as run_mock,
-        ):
-            ok, detail = m.try_install_openclaw_official_macos(spec, lambda _msg: None)
-        self.assertTrue(ok)
-        self.assertEqual(detail, m.OPENCLAW_NPM_PACKAGE)
-        brew_mock.assert_called_once()
-        node_mock.assert_called_once_with(unittest.mock.ANY, 22, min_version=(22, 14, 0))
-        command_text = " ".join(run_mock.call_args.args[0])
-        self.assertIn(m.OPENCLAW_INSTALL_URL, command_text)
-        self.assertIn("--no-onboard", command_text)
-
     def test_try_install_macos_cli_prefers_brew_or_npm_fallback(self) -> None:
         codex = next(spec for spec in m.CLI_SPECS if spec.key == "codex")
         qwen = next(spec for spec in m.CLI_SPECS if spec.key == "qwen")
@@ -2525,14 +2500,12 @@ class AutoUpdateSchedulerTests(unittest.TestCase):
         self.assertIn("update_brew_package formula qwen-code", script)
         self.assertIn("update_brew_package formula mistral-vibe", script)
         self.assertIn("update_brew_package formula ollama", script)
-        self.assertIn("update_brew_package formula ironclaw", script)
         self.assertIn("update_brew_package cask claude-code", script)
         self.assertIn("update_brew_package cask codex", script)
         self.assertIn("update_brew_package cask copilot-cli", script)
         self.assertIn("npm --no-fund --no-audit --no-update-notifier --loglevel error install -g", script)
         self.assertIn('install -g "${package}@latest"', script)
         self.assertIn("update_npm_package @vibe-kit/grok-cli", script)
-        self.assertIn("update_npm_package openclaw", script)
 
     def test_build_macos_launch_agent_plist_escapes_paths(self) -> None:
         with patch.object(m, "get_app_support_directory", return_value="/Users/A&B/Library/Application Support/InstallTheCli"):
@@ -3633,7 +3606,7 @@ class NodeInstallAndWorkflowTests(unittest.TestCase):
         selected = [
             next(spec for spec in m.CLI_SPECS if spec.key == "codex"),
             next(spec for spec in m.CLI_SPECS if spec.key == "grok"),
-            next(spec for spec in m.CLI_SPECS if spec.key == "openclaw"),
+            next(spec for spec in m.CLI_SPECS if spec.key == "commandcode"),
         ]
         state: dict[str, object] = {"auto_update_packages": None}
 
@@ -3660,7 +3633,7 @@ class NodeInstallAndWorkflowTests(unittest.TestCase):
             dummy._run_install(selected)
 
         brew_mock.assert_called_once()
-        node_mock.assert_called_once_with(unittest.mock.ANY, 22, min_version=(22, 14, 0))
+        node_mock.assert_called_once_with(unittest.mock.ANY, 22, min_version=(22, 0, 0))
         auto_mock.assert_called_once()
         self.assertEqual(state["auto_update_packages"], [])
         self.assertTrue(any("macOS AI CLI Installer started." in line for line in dummy.logs))
@@ -5184,13 +5157,13 @@ class FreebuffScriptContentTests(unittest.TestCase):
         script = self._read("install_all_windows.ps1")
         self.assertIn("freebuff = @{ Label = 'Freebuff CLI'; Packages = @('freebuff') }", script)
         self.assertIn('Update-NpmCli @("freebuff")', script)
-        self.assertIn("'openclaw','ironclaw','freebuff'", script)
+        self.assertIn("'freebuff'", script)
 
     def test_linux_script_installs_and_updates_freebuff(self) -> None:
         script = self._read("install_all_linux.sh")
         self.assertIn('install_npm_cli "Freebuff CLI" "freebuff"', script)
         self.assertIn('update_npm_cli "Freebuff CLI" "freebuff"', script)
-        self.assertIn("codex|grok|qwen|copilot|openclaw|ironclaw|freebuff", script)
+        self.assertIn("codex|grok|qwen|copilot|freebuff", script)
 
     def test_macos_script_installs_and_updates_freebuff(self) -> None:
         script = self._read("install_all_macos.sh")
@@ -5214,14 +5187,14 @@ class CommandCodeScriptContentTests(unittest.TestCase):
             "commandcode = @{ Label = 'Command Code CLI'; Packages = @('command-code') }", script
         )
         self.assertIn('Install-NpmCliTarget -Key \'commandcode\' -NpmPath $npm', script)
-        self.assertIn("'openclaw','ironclaw','freebuff','commandcode'", script)
+        self.assertIn("'freebuff','commandcode'", script)
         self.assertIn('Update-NpmCli @("command-code")', script)
 
     def test_linux_script_installs_and_updates_command_code(self) -> None:
         script = self._read("install_all_linux.sh")
         self.assertIn('install_npm_cli "Command Code CLI" "command-code"', script)
         self.assertIn('update_npm_cli "Command Code CLI" "command-code"', script)
-        self.assertIn("openclaw|ironclaw|freebuff|commandcode|command-code|cmdc", script)
+        self.assertIn("freebuff|commandcode|command-code|cmdc", script)
 
     def test_macos_script_installs_and_updates_command_code(self) -> None:
         script = self._read("install_all_macos.sh")

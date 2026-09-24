@@ -98,8 +98,6 @@ CLI specs (`CLI_SPECS` in `ai_cli_installer_gui.py`):
 - Mistral Vibe CLI (pip/uv; macOS formula `mistral-vibe`; optional)
 - Ollama (official only: winget `Ollama.Ollama` / `https://ollama.com/install.sh` / formula)
 - GitHub Copilot CLI (`@github/copilot`, npm; macOS cask `copilot-cli`)
-- OpenClaw CLI (npm; macOS official installer, Node 22.14+; optional)
-- IronClaw CLI (macOS formula; npm fallback elsewhere; optional)
 - Freebuff CLI (`freebuff`, npm; Node 16+; optional)
 - RTK (Rust Token Killer; cargo install from `rtk-ai/rtk` git master; optional)
 
@@ -184,9 +182,8 @@ set) and go through `ensure_app_cli` / `uninstall_app_cli`:
 5. macOS is Homebrew-first unless an official installer is the only confirmed
    source. If Homebrew is missing, ASK before installing it. CLI casks:
    `claude-code`, `codex`, `copilot-cli`, `antigravity`, `antigravity-ide`,
-   `visual-studio-code`. CLI formulae: `qwen-code`, `mistral-vibe`, `ollama`,
-   `ironclaw`. Desktop casks: `claude`, `chatgpt`, `google-gemini`. OpenClaw uses
-   `https://openclaw.ai/install.sh` (Node 22.14+). Grok installs Node via brew when needed.
+   `visual-studio-code`. CLI formulae: `qwen-code`, `mistral-vibe`, `ollama`.
+   Desktop casks: `claude`, `chatgpt`, `google-gemini`. Grok installs Node via brew when needed.
 6. `install_all_linux.sh` and `install_all_macos.sh` must stay LF-only. CRLF
    breaks Bash (`$'\r': command not found`). Normalize before testing if you edited on Windows.
 7. Preserve hidden/background updater behavior: no visible windows on Windows,
