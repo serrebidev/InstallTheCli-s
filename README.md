@@ -8,7 +8,7 @@ A vibe-coded, set-it-and-forget-it installer for Windows, macOS, and Linux that 
 
 ## Features
 
-- Installs fourteen AI CLIs: Command Code (`cmd`, detected as `cmdc` so it never collides with Windows' own `cmd.exe`), Claude, Codex, Antigravity 2.0, Antigravity CLI (`agy`), Antigravity IDE, Visual Studio Code, Grok, Qwen, GitHub Copilot, Freebuff, Mistral Vibe, Ollama, and RTK (Rust Token Killer, built from `rtk-ai/rtk` git master via cargo).
+- Installs fifteen AI CLIs: Command Code (`cmd`, detected as `cmdc` so it never collides with Windows' own `cmd.exe`), Claude, Codex, Antigravity 2.0, Antigravity CLI (`agy`), Antigravity IDE, Visual Studio Code, Grok, Qwen, GitHub Copilot, Freebuff, Mistral Vibe, Ollama, RTK (Rust Token Killer, built from `rtk-ai/rtk` git master via cargo), and Claudio (agent sounds).
 - Installs six desktop AI apps from the GUI: Claude, ChatGPT (the new app with Chat, ChatGPT Work, and Codex), Freebuff, Gemini, Microsoft Copilot, and Perplexity.
 - Works three ways so you can pick what fits: a point-and-click GUI, a one-click PowerShell script on Windows, and one-click Bash scripts on macOS and Linux.
 - Installs every missing prerequisite without making you chase them: Node.js and npm, Python 3.14 (Windows), pip or uv, and Homebrew on macOS — it asks before touching Homebrew, because that's not my call.
@@ -92,6 +92,7 @@ freebuff
 vibe
 ollama
 rtk
+claudio
 ```
 
 ## Run from source (any OS)

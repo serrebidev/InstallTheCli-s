@@ -56,6 +56,7 @@ This script installs:
     GitHub Copilot CLI, Mistral Vibe CLI, Ollama CLI (Homebrew)
   - Grok CLI, Freebuff CLI, Command Code CLI (npm, with Node.js installed by Homebrew if needed)
   - RTK (Rust Token Killer) from git master via cargo (opt-in: 'install rtk')
+  - Claudio agent sounds from the official release binary
   - launchd updater (RunAtLoad and daily) unless --no-launch-agent is used
 EOF
 }
@@ -77,6 +78,7 @@ Supported targets:
   mistral
   ollama
   rtk
+  claudio
   all
 
 Examples:
@@ -277,6 +279,7 @@ install_all_targets() {
   install_npm_cli "Command Code CLI" 22 "command-code"
   brew_install_formula mistral-vibe
   brew_install_formula ollama
+  install_claudio
 }
 
 # Install rustup + cargo via Homebrew if missing. Homebrew's rustup formula
@@ -382,6 +385,16 @@ install_rtk() {
   fi
 }
 
+install_claudio() {
+  [[ "$(uname -m)" == "arm64" ]] || die "Claudio has no macOS binary for $(uname -m)."
+  local exe="${HOME}/.local/bin/claudio"
+  run_cmd mkdir -p "${HOME}/.local/bin"
+  run_cmd curl -fsSL -o "${exe}.download" https://github.com/ctoth/claudio/releases/latest/download/claudio-darwin-arm64
+  run_cmd chmod +x "${exe}.download"
+  run_cmd mv -f "${exe}.download" "$exe"
+  run_cmd "$exe" install --agent auto --scope global
+}
+
 install_single_target() {
   local target_key
   target_key="$(lower "$1")"
@@ -404,6 +417,7 @@ install_single_target() {
     mistral|mistral-vibe|vibe) brew_install_formula mistral-vibe ;;
     ollama) brew_install_formula ollama ;;
     rtk) install_rtk ;;
+    claudio) install_claudio ;;
     *) die "Unknown target: ${target_key}. Use '$SCRIPT_NAME list' to see supported targets." ;;
   esac
 }
@@ -518,6 +532,18 @@ update_rtk() {
   configure_rtk_integrations "$rtk_exe"
 }
 update_rtk
+update_claudio() {
+  local exe="${HOME}/.local/bin/claudio" latest current
+  [[ -x "$exe" && "$(uname -m)" == "arm64" ]] || return 0
+  latest="$(curl -fsSL https://api.github.com/repos/ctoth/claudio/releases/latest 2>/dev/null | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' | head -1)"
+  current="$("$exe" --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9.]*\).*/\1/p' | head -1)"
+  if [[ -n "$latest" && "$latest" != "$current" ]]; then
+    curl -fsSL -o "${exe}.download" https://github.com/ctoth/claudio/releases/latest/download/claudio-darwin-arm64 \
+      && chmod +x "${exe}.download" && mv -f "${exe}.download" "$exe" || log "Claudio download failed; keeping installed version"
+  fi
+  "$exe" install --agent auto --scope global >/dev/null 2>&1 || log "Claudio hook registration failed"
+}
+update_claudio
 EOF
 }
 
@@ -619,7 +645,7 @@ parse_args() {
     help)
       SUBCOMMAND="help"
       ;;
-    claude|codex|antigravity|antigravity_cli|antigravity_ide|agy|vscode|code|grok|qwen|copilot|freebuff|commandcode|command-code|cmdc|mistral|mistral-vibe|vibe|ollama|rtk|all)
+    claude|codex|antigravity|antigravity_cli|antigravity_ide|agy|vscode|code|grok|qwen|copilot|freebuff|commandcode|command-code|cmdc|mistral|mistral-vibe|vibe|ollama|rtk|claudio|all)
       SUBCOMMAND="install"
       TARGET="$command_name"
       ;;

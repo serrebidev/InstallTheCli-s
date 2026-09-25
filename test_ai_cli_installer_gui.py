@@ -4480,7 +4480,7 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertIn('--agent "$agent"', script)
         # rtk must be a listed target and a parser alias.
         self.assertIn("\n  rtk\n", script)
-        self.assertIn("ollama|rtk|all", script)
+        self.assertIn("ollama|rtk|claudio|all", script)
 
     def test_macos_one_click_script_contains_rtk_target(self) -> None:
         script_path = os.path.join(os.getcwd(), "install_all_macos.sh")
@@ -4497,7 +4497,7 @@ class RtkIntegrationTests(unittest.TestCase):
         self.assertNotIn("gemini", script.lower())
         self.assertIn("--copilot", script)
         self.assertIn('--agent "$agent"', script)
-        self.assertIn("ollama|rtk|all", script)
+        self.assertIn("ollama|rtk|claudio|all", script)
 
     def test_windows_one_click_script_contains_rtk_target(self) -> None:
         script_path = os.path.join(os.getcwd(), "install_all_windows.ps1")
@@ -5304,6 +5304,53 @@ class AuditFixScriptTests(unittest.TestCase):
         self.assertIn("Claude CLI is not installed on this machine; skipping Claude update.", script)
         self.assertIn("Write-Utf8NoBom $claudeMarker", script)
         self.assertIn("$legacyClaudeNpm", script)
+
+
+class ClaudioIntegrationTests(unittest.TestCase):
+    def test_install_downloads_binary_then_registers_hooks(self) -> None:
+        spec = next(s for s in m.CLI_SPECS if s.key == "claudio")
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = os.path.join(tmp, "claudio.exe")
+
+            def download(url: str, dest: str, _label: str, _log: object) -> bool:
+                self.assertTrue(url.endswith("claudio-windows-amd64.exe"))
+                with open(dest, "wb") as output:
+                    output.write(b"binary")
+                return True
+
+            with (
+                patch.object(m, "get_claudio_exe_path", return_value=exe),
+                patch.object(m, "claudio_asset_name", return_value="claudio-windows-amd64.exe"),
+                patch.object(m, "_download_to_file", side_effect=download),
+                patch.object(m, "run_command", return_value=0) as run,
+            ):
+                self.assertEqual(m.try_install_claudio(spec, lambda _msg: None), (True, "claudio"))
+            self.assertTrue(os.path.isfile(exe))
+            run.assert_called_once_with([exe, "install", "--agent", "auto", "--scope", "global"], unittest.mock.ANY)
+
+    def test_uninstall_keeps_binary_if_hook_removal_fails(self) -> None:
+        spec = next(s for s in m.CLI_SPECS if s.key == "claudio")
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = os.path.join(tmp, "claudio.exe")
+            with open(exe, "wb") as output:
+                output.write(b"binary")
+            with (
+                patch.object(m, "get_claudio_exe_path", return_value=exe),
+                patch.object(m, "run_command", return_value=1),
+            ):
+                ok, _ = m.try_uninstall_claudio(spec, lambda _msg: None)
+            self.assertFalse(ok)
+            self.assertTrue(os.path.isfile(exe))
+
+    def test_all_installers_and_updaters_include_claudio(self) -> None:
+        scripts = [m.build_cli_auto_update_script("npm.cmd", "packages.txt"),
+                   m.build_macos_cli_auto_update_script()]
+        for path in ("install_all_windows.ps1", "install_all_linux.sh", "install_all_macos.sh"):
+            with open(path, encoding="utf-8") as source:
+                scripts.append(source.read())
+        for script in scripts:
+            self.assertIn("claudio", script.lower())
+            self.assertIn("install --agent auto --scope global", script)
 
 
 if __name__ == "__main__":  # pragma: no cover

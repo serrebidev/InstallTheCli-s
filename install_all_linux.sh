@@ -73,6 +73,7 @@ This script installs:
   - Antigravity (official tar.gz from antigravity.google) and Visual Studio Code
     (official .deb/.rpm/tar.gz from code.visualstudio.com)
   - RTK (Rust Token Killer) from git master via cargo (opt-in: 'install rtk')
+  - Claudio agent sounds from the official release binary
   - Cron updater (@reboot and daily) unless --no-cron is used
 EOF
 }
@@ -94,6 +95,7 @@ Supported targets:
   mistral
   ollama
   rtk
+  claudio
   all
 
 Examples:
@@ -705,6 +707,16 @@ install_rtk() {
   fi
 }
 
+install_claudio() {
+  [[ "$(uname -m)" == "x86_64" ]] || die "Claudio has no Linux binary for $(uname -m)."
+  local exe="/root/.local/bin/claudio"
+  run_cmd mkdir -p /root/.local/bin
+  run_cmd curl -fsSL -o "$exe.download" https://github.com/ctoth/claudio/releases/latest/download/claudio-linux-amd64
+  run_cmd chmod +x "$exe.download"
+  run_cmd mv -f "$exe.download" "$exe"
+  run_cmd "$exe" install --agent auto --scope global
+}
+
 install_all_targets() {
   install_claude_native
   install_all_npm_clis
@@ -716,6 +728,7 @@ install_all_targets() {
   install_antigravity_linux
   install_antigravity_cli_linux
   install_vscode_linux
+  install_claudio
 }
 
 install_single_target() {
@@ -744,6 +757,9 @@ install_single_target() {
       ;;
     rtk)
       install_rtk
+      ;;
+    claudio)
+      install_claudio
       ;;
     claude)
       install_claude_native
@@ -992,12 +1008,25 @@ update_rtk() {
   log "Updated rtk to $("$rtk_bin" --version 2>&1)"
 }
 
+update_claudio() {
+  local exe="/root/.local/bin/claudio" latest current
+  [[ -x "$exe" ]] || return 0
+  latest="$(curl -fsSL https://api.github.com/repos/ctoth/claudio/releases/latest 2>/dev/null | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' | head -1)"
+  current="$("$exe" --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9.]*\).*/\1/p' | head -1)"
+  if [[ -n "$latest" && "$latest" != "$current" ]]; then
+    curl -fsSL -o "$exe.download" https://github.com/ctoth/claudio/releases/latest/download/claudio-linux-amd64 \
+      && chmod +x "$exe.download" && mv -f "$exe.download" "$exe" || log "Claudio download failed; keeping installed version"
+  fi
+  "$exe" install --agent auto --scope global >/dev/null 2>&1 || log "Claudio hook registration failed"
+}
+
 main() {
   update_claude_native
   update_npm_all
   update_mistral_vibe
   update_ollama
   update_rtk
+  update_claudio
 }
 
 main "$@"
@@ -1118,7 +1147,7 @@ parse_args() {
     help)
       SUBCOMMAND="help"
       ;;
-    claude|codex|antigravity|antigravity_cli|antigravity_ide|agy|vscode|code|grok|qwen|copilot|freebuff|commandcode|command-code|cmdc|mistral|mistral-vibe|vibe|ollama|rtk|all)
+    claude|codex|antigravity|antigravity_cli|antigravity_ide|agy|vscode|code|grok|qwen|copilot|freebuff|commandcode|command-code|cmdc|mistral|mistral-vibe|vibe|ollama|rtk|claudio|all)
       # Convenience alias: treat first positional target as "install <target>"
       SUBCOMMAND="install"
       TARGET="${positional[0],,}"

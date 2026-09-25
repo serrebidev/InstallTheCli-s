@@ -69,6 +69,10 @@ RUSTUP_INIT_URL = "https://sh.rustup.rs"
 RUSTUP_WINGET_ID = "Rustlang.Rustup"
 RTK_GIT_URL = "https://github.com/rtk-ai/rtk"
 RTK_GIT_BRANCH = "master"
+# Claudio (ctoth/claudio): hook-driven sounds for AI coding agents. Installed
+# from the prebuilt GitHub release binary, then `claudio install` hooks every
+# agent it detects.
+CLAUDIO_RELEASE_URL = "https://github.com/ctoth/claudio/releases/latest/download"
 AUTO_UPDATE_TASK_NAME = "InstallTheCli - Update AI CLIs"
 AUTO_UPDATE_DAILY_TIME = "3:00AM"
 AUTO_UPDATE_DIR_NAME = "InstallTheCli"
@@ -356,6 +360,20 @@ CLI_SPECS: tuple[CliSpec, ...] = (
         shortcut_name="RTK",
         cargo_git_url=RTK_GIT_URL,
         cargo_git_branch=RTK_GIT_BRANCH,
+        optional=True,
+    ),
+    CliSpec(
+        key="claudio",
+        label="Claudio (agent sounds)",
+        help_text=(
+            "Installs Claudio, which plays sounds for AI coding agent events (tool runs, "
+            "errors, prompts, completion) through the agents' hooks. Downloads the prebuilt "
+            "release binary and hooks every detected agent. Install it after the CLIs. "
+            "Codex asks you to trust the hook once with /hooks."
+        ),
+        package_candidates=("claudio",),
+        command_candidates=("claudio",),
+        shortcut_name="Claudio",
         optional=True,
     ),
 )
@@ -1414,6 +1432,23 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "  }",
         "}",
         "Update-Rtk",
+        # Claudio: fetch a newer release binary when one exists, then rerun
+        # `claudio install` so agents installed since then get hooked too.
+        "function Update-Claudio {",
+        "  $exe = Join-Path $env:LOCALAPPDATA 'Programs\\claudio\\claudio.exe'",
+        "  if (-not (Test-Path -LiteralPath $exe)) { return }",
+        "  try {",
+        "    $latest = (Invoke-RestMethod -UseBasicParsing -Uri 'https://api.github.com/repos/ctoth/claudio/releases/latest').tag_name -replace '^v',''",
+        "    $current = ((& $exe --version 2>&1) -join ' ') -replace '^.*version ([0-9][0-9.]*).*$','$1'",
+        "    if ($latest -and $latest -ne $current) {",
+        "      Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/ctoth/claudio/releases/latest/download/claudio-windows-amd64.exe' -OutFile \"$exe.download\"",
+        "      Move-Item -LiteralPath \"$exe.download\" -Destination $exe -Force",
+        "    }",
+        "  } catch { Write-Warning \"Claudio update failed: $_\" }",
+        "  & $exe install --agent auto --scope global *>&1 | Out-Null",
+        "  if ($LASTEXITCODE -ne 0) { Write-Warning \"Claudio hook registration exited $LASTEXITCODE\" }",
+        "}",
+        "Update-Claudio",
         "Ensure-WindowsCliTerminalCompatibility",
         "exit 0",
     ]
@@ -1770,6 +1805,21 @@ update_rtk() {{
   configure_rtk_supported_agents "$rtk_exe"
 }}
 update_rtk
+
+# Claudio: fetch a newer release binary when one exists, then rerun
+# `claudio install` so agents installed since then get hooked too.
+update_claudio() {{
+  local exe="${{HOME}}/.local/bin/claudio" latest current
+  [[ -x "$exe" && "$(uname -m)" == "arm64" ]] || return 0
+  latest="$(curl -fsSL https://api.github.com/repos/ctoth/claudio/releases/latest 2>/dev/null | sed -n 's/.*"tag_name": *"v\\([^"]*\\)".*/\\1/p' | head -1)"
+  current="$("$exe" --version 2>/dev/null | sed -n 's/.*version \\([0-9][0-9.]*\\).*/\\1/p' | head -1)"
+  if [[ -n "$latest" && "$latest" != "$current" ]]; then
+    curl -fsSL -o "${{exe}}.download" https://github.com/ctoth/claudio/releases/latest/download/claudio-darwin-arm64 \
+      && chmod +x "${{exe}}.download" && mv -f "${{exe}}.download" "$exe" || echo 'Claudio download failed' >&2
+  fi
+  "$exe" install --agent auto --scope global >/dev/null 2>&1 || echo 'Claudio hook registration failed' >&2
+}}
+update_claudio
 """
 
 
@@ -3867,6 +3917,96 @@ def try_uninstall_rtk(
     return (False, err)
 
 
+def claudio_asset_name() -> Optional[str]:
+    """The ctoth/claudio release asset for this machine, or None when no
+    prebuilt binary exists (Intel Macs, non-x86_64 Linux)."""
+    machine = platform.machine().lower()
+    if is_windows():
+        return "claudio-windows-amd64.exe"  # also runs under ARM64 emulation
+    if is_macos():
+        return "claudio-darwin-arm64" if machine in ("arm64", "aarch64") else None
+    if machine in ("x86_64", "amd64"):
+        return "claudio-linux-amd64"
+    return None
+
+
+def get_claudio_install_dir() -> str:
+    if is_windows():
+        local_app_data = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+        return os.path.join(local_app_data, "Programs", "claudio")
+    return os.path.join(os.path.expanduser("~"), ".local", "bin")
+
+
+def get_claudio_exe_path() -> str:
+    return os.path.join(get_claudio_install_dir(), "claudio.exe" if is_windows() else "claudio")
+
+
+def get_claudio_cli_bin_dirs(log: Callable[[str], None]) -> list[str]:
+    del log  # kept for call-shape consistency with the other helpers
+    directory = get_claudio_install_dir()
+    return [directory] if os.path.isdir(directory) else []
+
+
+def try_install_claudio(
+    spec: CliSpec,
+    log: Callable[[str], None],
+) -> tuple[bool, Optional[str]]:
+    """Download the latest Claudio release binary, then run `claudio install`
+    so it hooks every agent it detects. The binary counts as installed even
+    when no agent is found yet; rerunning `claudio install` hooks later ones."""
+    asset = claudio_asset_name()
+    if not asset:
+        err = f"No prebuilt {spec.label} binary for {platform.system()} {platform.machine()}."
+        log(err)
+        return (False, err)
+    exe = get_claudio_exe_path()
+    try:
+        os.makedirs(os.path.dirname(exe), exist_ok=True)
+    except OSError as exc:
+        err = f"Could not create {spec.label} directory: {exc}"
+        log(err)
+        return (False, err)
+    download = exe + ".download"
+    if not _download_to_file(f"{CLAUDIO_RELEASE_URL}/{asset}", download, spec.label, log):
+        return (False, f"Could not download {spec.label}.")
+    try:
+        if not is_windows():
+            os.chmod(download, 0o755)
+        os.replace(download, exe)
+    except OSError as exc:
+        err = f"Could not install {spec.label} to {exe}: {exc}"
+        log(err)
+        return (False, err)
+    log(f"Installed {spec.label} to {exe}")
+    code = run_command([exe, "install", "--agent", "auto", "--scope", "global"], log)
+    if code != 0:
+        log("Claudio found no agents to hook yet; run 'claudio install' after installing one.")
+    return (True, "claudio")
+
+
+def try_uninstall_claudio(
+    spec: CliSpec,
+    log: Callable[[str], None],
+) -> tuple[bool, Optional[str]]:
+    """Remove Claudio's hooks from every agent, then delete the binary."""
+    exe = get_claudio_exe_path()
+    if not os.path.isfile(exe):
+        err = f"{spec.label} is not installed at {exe}"
+        log(err)
+        return (False, err)
+    if run_command([exe, "uninstall", "--agent", "all", "--scope", "global"], log) != 0:
+        err = "Could not remove Claudio hooks; keeping the binary so existing hooks still work."
+        log(err)
+        return (False, err)
+    try:
+        os.unlink(exe)
+    except OSError as exc:
+        err = f"Could not remove {exe}: {exc}"
+        log(err)
+        return (False, err)
+    return (True, "claudio")
+
+
 def try_uninstall_mistral_vibe(
     spec: CliSpec,
     log: Callable[[str], None],
@@ -5285,6 +5425,7 @@ class InstallerFrame(wx.Frame):
         # PATH picks up the persisted entries, so the button flips back to
         # "Install" and Install All would reinstall it in the same session.
         dirs = dedupe_preserve_order(dirs + get_rtk_cli_bin_dirs(self._detection_log))
+        dirs = dedupe_preserve_order(dirs + get_claudio_cli_bin_dirs(self._detection_log))
         for app_spec in CLI_SPECS:
             if cli_is_app_installer(app_spec):
                 dirs = dedupe_preserve_order(dirs + get_app_cli_bin_dirs(app_spec, self._detection_log))
@@ -5651,7 +5792,7 @@ class InstallerFrame(wx.Frame):
             return
 
         needs_npm = (
-            any(spec.key not in ("mistral", "ollama", "rtk") and not cli_is_app_installer(spec) for spec in selected)
+            any(spec.key not in ("mistral", "ollama", "rtk", "claudio") and not cli_is_app_installer(spec) for spec in selected)
             and not is_macos()
         )
         npm_exe: Optional[str] = None
@@ -5677,6 +5818,8 @@ class InstallerFrame(wx.Frame):
                     success, detail = try_uninstall_ollama(self.log)
                 elif spec.key == "rtk":
                     success, detail = try_uninstall_rtk(spec, self.log)
+                elif spec.key == "claudio":
+                    success, detail = try_uninstall_claudio(spec, self.log)
                 elif cli_is_app_installer(spec):
                     # Mirror the install dispatch: brew casks plus the agy
                     # official installer, which try_uninstall_macos_cli would
@@ -5690,6 +5833,8 @@ class InstallerFrame(wx.Frame):
                 success, detail = try_uninstall_ollama(self.log)
             elif spec.key == "rtk":
                 success, detail = try_uninstall_rtk(spec, self.log)
+            elif spec.key == "claudio":
+                success, detail = try_uninstall_claudio(spec, self.log)
             elif cli_is_app_installer(spec):
                 success, detail = uninstall_app_cli(spec, self.log)
             else:
@@ -5704,7 +5849,7 @@ class InstallerFrame(wx.Frame):
 
             self.log(f"Uninstall completed for {spec.label}.")
             remove_cli_desktop_shortcuts(spec, self.log)
-            if spec.key not in ("mistral", "ollama", "rtk") and not cli_is_app_installer(spec):
+            if spec.key not in ("mistral", "ollama", "rtk", "claudio") and not cli_is_app_installer(spec):
                 removed_npm_packages.extend(spec.package_candidates)
 
         if removed_npm_packages and is_windows():
@@ -5737,6 +5882,7 @@ class InstallerFrame(wx.Frame):
         needs_python_cli_dirs = any(spec.key == "mistral" for spec in selected)
         needs_ollama_cli_dirs = any(spec.key == "ollama" for spec in selected)
         needs_rtk_cli_dirs = any(spec.key == "rtk" for spec in selected)
+        needs_claudio_cli_dirs = any(spec.key == "claudio" for spec in selected)
         app_cli_specs = [spec for spec in selected if cli_is_app_installer(spec)]
 
         def _augment_app_cli_dirs(dirs: list[str]) -> list[str]:
@@ -5753,7 +5899,7 @@ class InstallerFrame(wx.Frame):
                 spec.macos_requires_node_version or (spec.macos_requires_node_major or 20, 0, 0)
                 for spec in selected
                 if spec.macos_requires_node_major
-                or (not spec.macos_brew_formula and not spec.macos_brew_cask and spec.key not in ("mistral", "ollama", "rtk"))
+                or (not spec.macos_brew_formula and not spec.macos_brew_cask and spec.key not in ("mistral", "ollama", "rtk", "claudio"))
             ]
             if required_node_versions:
                 required = max(required_node_versions)
@@ -5782,6 +5928,9 @@ class InstallerFrame(wx.Frame):
             cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_ollama_cli_bin_dirs(self.log))
         if needs_rtk_cli_dirs:
             cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_rtk_cli_bin_dirs(self.log))
+        if needs_claudio_cli_dirs:
+            os.makedirs(get_claudio_install_dir(), exist_ok=True)
+            cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_claudio_cli_bin_dirs(self.log))
         cli_bin_dirs = _augment_app_cli_dirs(cli_bin_dirs)
         self.log("PATH directories to ensure: " + (", ".join(cli_bin_dirs) if cli_bin_dirs else "(none found yet)"))
 
@@ -5820,6 +5969,8 @@ class InstallerFrame(wx.Frame):
                     success, pkg = ensure_ollama_via_winget(self.log)
                 elif spec.key == "rtk":
                     success, pkg = try_install_rtk(spec, self.log)
+                elif spec.key == "claudio":
+                    success, pkg = try_install_claudio(spec, self.log)
                 elif cli_is_app_installer(spec):
                     # claude/antigravity/vscode/antigravity_ide have brew casks,
                     # and the standalone Antigravity CLI (agy) has no cask at all
@@ -5836,6 +5987,8 @@ class InstallerFrame(wx.Frame):
                 success, pkg = ensure_ollama_via_winget(self.log)
             elif spec.key == "rtk":
                 success, pkg = try_install_rtk(spec, self.log)
+            elif spec.key == "claudio":
+                success, pkg = try_install_claudio(spec, self.log)
             elif cli_is_app_installer(spec):
                 success, pkg = ensure_app_cli(spec, self.log)
             else:
@@ -5861,7 +6014,7 @@ class InstallerFrame(wx.Frame):
 
             assert pkg is not None
             self.log(f"Installed {spec.label} using package {pkg}")
-            if not is_macos() and spec.key not in ("mistral", "ollama", "rtk") and not cli_is_app_installer(spec):
+            if not is_macos() and spec.key not in ("mistral", "ollama", "rtk", "claudio") and not cli_is_app_installer(spec):
                 installed_packages.append(pkg)
 
             cli_bin_dirs = get_cli_bin_dirs(npm_exe, self.log)
@@ -5871,6 +6024,8 @@ class InstallerFrame(wx.Frame):
                 cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_ollama_cli_bin_dirs(self.log))
             if spec.key == "rtk":
                 cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_rtk_cli_bin_dirs(self.log))
+            if spec.key == "claudio":
+                cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_claudio_cli_bin_dirs(self.log))
             if cli_is_app_installer(spec):
                 cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_app_cli_bin_dirs(spec, self.log))
             command_path = resolve_command_path(spec.command_candidates, cli_bin_dirs)
@@ -5889,6 +6044,8 @@ class InstallerFrame(wx.Frame):
             cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_ollama_cli_bin_dirs(self.log))
         if needs_rtk_cli_dirs:
             cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_rtk_cli_bin_dirs(self.log))
+        if needs_claudio_cli_dirs:
+            cli_bin_dirs = dedupe_preserve_order(cli_bin_dirs + get_claudio_cli_bin_dirs(self.log))
         cli_bin_dirs = _augment_app_cli_dirs(cli_bin_dirs)
         added_user, user_err = add_dirs_to_path("user", cli_bin_dirs)
         if user_err:

@@ -137,6 +137,10 @@ set) and go through `ensure_app_cli` / `uninstall_app_cli`:
 - rtk integration: Antigravity is wired via `rtk init -g --agent antigravity`
   (in `RTK_OPTIONAL_INTEGRATIONS` and every updater's agent loop). There is no
   per-app `.gemini`-style hook config anymore.
+- Claudio downloads the matching prebuilt release to a stable path, then runs
+  `claudio install --agent auto --scope global`. Hooks record that binary path.
+  Windows uses `%LOCALAPPDATA%\Programs\claudio\claudio.exe`; macOS/Linux use
+  `~/.local/bin/claudio`. The hidden updaters refresh installed Claudio.
 
 ## Auto-Update Behavior
 - Windows (GUI and PowerShell script): hidden Scheduled Task

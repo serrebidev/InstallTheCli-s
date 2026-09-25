@@ -15,7 +15,7 @@ Also configures a hidden Scheduled Task (startup, logon, daily) unless disabled.
 Subcommand: install-all (default), install, list, setup-updater, help.
 
 .PARAMETER Target
-Target for the install subcommand: claude, codex, antigravity, antigravity_cli, antigravity_ide, vscode, grok, qwen, copilot, freebuff, commandcode, mistral, ollama, rtk, all.
+Target for the install subcommand: claude, codex, antigravity, antigravity_cli, antigravity_ide, vscode, grok, qwen, copilot, freebuff, commandcode, mistral, ollama, rtk, claudio, all.
 
 .PARAMETER NoAutoUpdate
 Skips creation/update of the hidden scheduled auto-update task.
@@ -71,6 +71,7 @@ $AntigravityIdeWingetId = 'Google.AntigravityIDE'
 $VSCodeWingetId = 'Microsoft.VisualStudioCode'
 $RustupWingetId = 'Rustlang.Rustup'
 $RtkGitUrl = 'https://github.com/rtk-ai/rtk'
+$ClaudioReleaseUrl = 'https://github.com/ctoth/claudio/releases/latest/download/claudio-windows-amd64.exe'
 $AutoUpdateTaskName = 'InstallTheCli - Update AI CLIs'
 $LocalAppDataRoot = if ($env:LocalAppData) { $env:LocalAppData } else { Join-Path $HOME 'AppData\Local' }
 $SupportDir = Join-Path $LocalAppDataRoot 'InstallTheCli'
@@ -425,6 +426,30 @@ function Install-Rtk {
     }
 }
 
+function Install-Claudio {
+    $dir = Join-Path $LocalAppDataRoot 'Programs\claudio'
+    $exe = Join-Path $dir 'claudio.exe'
+    Write-Log "Installing Claudio from $ClaudioReleaseUrl"
+    if ($DryRun) {
+        Write-Log "Dry-run: would download to $exe and register detected agent hooks."
+        return
+    }
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $download = "$exe.download"
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri $ClaudioReleaseUrl -OutFile $download
+        Move-Item -LiteralPath $download -Destination $exe -Force
+    } catch {
+        Remove-Item -LiteralPath $download -Force -ErrorAction SilentlyContinue
+        Throw-InstallError "Claudio download failed: $($_.Exception.Message)"
+    }
+    $code = Invoke-ExternalCommand -Args @($exe, 'install', '--agent', 'auto', '--scope', 'global')
+    if ($code -ne 0) {
+        Throw-InstallError "Claudio hook registration failed with exit code $code."
+    }
+    Write-Log "Installed Claudio: $(& $exe --version 2>&1)"
+}
+
 # Claude Code on Windows runs PreToolUse hooks through Git Bash (/usr/bin/bash),
 # whose minimal PATH does NOT include the cargo bin dir, so a bare `rtk` can't
 # resolve there. rtk's own hook-detector, however, only recognizes the bare
@@ -679,6 +704,7 @@ function Get-WindowsCliPathCandidateDirs {
         (Join-Path $env:APPDATA 'npm'),
         (Join-Path $env:LOCALAPPDATA 'agy\bin'),
         (Join-Path $env:USERPROFILE '.cargo\bin'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\claudio'),
         (Join-Path $env:USERPROFILE '.local\bin'),
         (Join-Path $env:LOCALAPPDATA 'Programs\Ollama'),
         (Join-Path $env:ProgramFiles 'Ollama'),
@@ -1254,6 +1280,7 @@ function Get-WindowsCliPathCandidateDirs {
     (Join-Path $env:APPDATA 'npm'),
     (Join-Path $env:LOCALAPPDATA 'agy\bin'),
     (Join-Path $env:USERPROFILE '.cargo\bin'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\claudio'),
     (Join-Path $env:USERPROFILE '.local\bin'),
     (Join-Path $env:LOCALAPPDATA 'Programs\Ollama'),
     (Join-Path $env:ProgramFiles 'Ollama'),
@@ -1774,6 +1801,24 @@ function Update-Rtk {
   }
 }
 Update-Rtk
+function Update-Claudio {
+  $exe = Join-Path $env:LOCALAPPDATA 'Programs\claudio\claudio.exe'
+  if (-not (Test-Path -LiteralPath $exe)) { return }
+  try {
+    $latest = (Invoke-RestMethod -UseBasicParsing -Uri 'https://api.github.com/repos/ctoth/claudio/releases/latest').tag_name -replace '^v',''
+    $current = ((& $exe --version 2>&1) -join ' ') -replace '^.*version ([0-9][0-9.]*).*$','$1'
+    if ($latest -and $latest -ne $current) {
+      $download = "$exe.download"
+      Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/ctoth/claudio/releases/latest/download/claudio-windows-amd64.exe' -OutFile $download
+      Move-Item -LiteralPath $download -Destination $exe -Force
+    }
+    & $exe install --agent auto --scope global *> $null
+    if ($LASTEXITCODE -ne 0) { Write-Warning "Claudio hook registration exited $LASTEXITCODE" }
+  } catch {
+    Write-Warning "Claudio update failed: $($_.Exception.Message)"
+  }
+}
+Update-Claudio
 Ensure-WindowsCliTerminalCompatibility
 '@
 }
@@ -1836,7 +1881,7 @@ function Ensure-HiddenAutoUpdateTask {
 
 function Show-Targets {
     @(
-        'claude', 'codex', 'antigravity', 'antigravity_cli', 'antigravity_ide', 'vscode', 'grok', 'qwen', 'copilot', 'freebuff', 'commandcode', 'mistral', 'ollama', 'rtk', 'all'
+        'claude', 'codex', 'antigravity', 'antigravity_cli', 'antigravity_ide', 'vscode', 'grok', 'qwen', 'copilot', 'freebuff', 'commandcode', 'mistral', 'ollama', 'rtk', 'claudio', 'all'
     ) | ForEach-Object { Write-Host $_ }
 }
 
@@ -1847,7 +1892,7 @@ Usage:
 
 Commands:
   install-all              Install all supported CLIs (default)
-  install <target>         Install one target (claude/codex/antigravity/antigravity_cli/antigravity_ide/vscode/grok/qwen/copilot/freebuff/commandcode/mistral/ollama/rtk/all)
+  install <target>         Install one target (claude/codex/antigravity/antigravity_cli/antigravity_ide/vscode/grok/qwen/copilot/freebuff/commandcode/mistral/ollama/rtk/claudio/all)
   setup-updater            Configure hidden auto-update Scheduled Task only
   list                     List supported targets
   help                     Show help (or use: Get-Help .\install_all_windows.ps1 -Detailed)
@@ -1878,6 +1923,7 @@ function Install-Target {
         'vibe'    { Install-MistralVibe }
         'ollama'  { Install-OllamaOfficial }
         'rtk'     { Install-Rtk }
+        'claudio' { Install-Claudio }
         'all'     { Install-AllTargets }
         default   { Throw-InstallError "Unknown target: $NormalizedTarget" }
     }
@@ -1895,6 +1941,7 @@ function Install-AllTargets {
     Install-AntigravityCli
     Install-AntigravityIde
     Install-VSCode
+    Install-Claudio
 }
 
 function Normalize-Subcommand {
