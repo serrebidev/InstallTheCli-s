@@ -135,7 +135,7 @@ ssh -o BatchMode=yes %LINUX_BUILD_HOST% bash -s -- v%NEXT_VERSION% < "%~dp0tools
 set "LINUX_REMOTE_DIR="
 for /f "usebackq delims=" %%D in ("%RELEASE_DIR%\linux_remote_dir.txt") do set "LINUX_REMOTE_DIR=%%D"
 if not defined LINUX_REMOTE_DIR exit /b 1
-scp -o BatchMode=yes "%LINUX_BUILD_HOST%:%LINUX_REMOTE_DIR%/*" "%RELEASE_DIR%\" || exit /b 1
+scp -o BatchMode=yes "%LINUX_BUILD_HOST%:%LINUX_REMOTE_DIR%/*" "%RELEASE_DIR%\." || exit /b 1
 ssh -o BatchMode=yes %LINUX_BUILD_HOST% "rm -rf -- %LINUX_REMOTE_DIR%/.."
 gh release upload "v%NEXT_VERSION%" "%RELEASE_DIR%\InstallTheCli-v%NEXT_VERSION%-linux.tar.gz" "%RELEASE_DIR%\InstallTheCli-v%NEXT_VERSION%-linux-SHA256SUMS.txt" --repo "%GITHUB_REPO_SLUG%" --clobber || exit /b 1
 echo [release] Linux artifact attached to v%NEXT_VERSION%.
