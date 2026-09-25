@@ -429,12 +429,14 @@ function Install-Rtk {
 # whose minimal PATH does NOT include the cargo bin dir, so a bare `rtk` can't
 # resolve there. rtk's own hook-detector, however, only recognizes the bare
 # `rtk hook claude` string -- an absolute-path hook works but makes rtk print a
-# "No hook installed" nag on every proxied command. We drop a tiny `rtk` shim
-# into Git's usr\bin (which IS on that minimal PATH) so we can use the bare
-# form (no nag); if the shim can't be written we fall back to the absolute
-# POSIX path (works, but nags).
+# "No hook installed" nag on every proxied command. We copy rtk.exe into Git's
+# usr\bin (which IS on that minimal PATH; Git Bash finds rtk.exe as `rtk`) so we
+# can use the bare form (no nag); if the copy fails we fall back to the absolute
+# POSIX path (works, but nags). It must be a real .exe: an extensionless bash
+# script there makes Windows ask "Select an app to open 'rtk'" whenever a native
+# tool resolves it from the Windows PATH.
 function Install-RtkBashShim {
-    param([Parameter(Mandatory = $true)][string]$RtkPosix)
+    param([Parameter(Mandatory = $true)][string]$RtkExe)
     try {
         # git.exe may live in <Git>\cmd, <Git>\bin, or <Git>\mingw64\bin, so
         # walk up until we find the install root whose usr\bin holds bash.exe
@@ -448,11 +450,13 @@ function Install-RtkBashShim {
             $dir = Split-Path -Parent $dir
         }
         if (-not $usrBin) { return $false }
-        $shimPath = Join-Path $usrBin 'rtk'
-        $shimBody = "#!/usr/bin/bash`nexec '$RtkPosix' `"`$@`"`n"
-        $existing = if (Test-Path -LiteralPath $shimPath) { [System.IO.File]::ReadAllText($shimPath) } else { $null }
-        if ($existing -ne $shimBody) {
-            [System.IO.File]::WriteAllText($shimPath, $shimBody, (New-Object System.Text.UTF8Encoding($false)))
+        $legacy = Join-Path $usrBin 'rtk'
+        if (Test-Path -LiteralPath $legacy) { Remove-Item -LiteralPath $legacy -Force }
+        $shimPath = Join-Path $usrBin 'rtk.exe'
+        $same = (Test-Path -LiteralPath $shimPath) -and ((Get-FileHash -LiteralPath $shimPath).Hash -eq (Get-FileHash -LiteralPath $RtkExe).Hash)
+        if (-not $same) {
+            # A running rtk.exe locks the old copy; it still works until next time.
+            try { Copy-Item -LiteralPath $RtkExe -Destination $shimPath -Force } catch { }
         }
         return (Test-Path -LiteralPath $shimPath)
     } catch {
@@ -473,7 +477,7 @@ function Update-ClaudeRtkHookCommand {
         if (-not $settings.hooks -or -not $settings.hooks.PreToolUse) { return }
         $up = $env:USERPROFILE
         $rtkPosix = '/' + $up.Substring(0,1).ToLower() + ($up.Substring(2) -replace '\\','/') + '/.cargo/bin/rtk.exe'
-        $want = if (Install-RtkBashShim -RtkPosix $rtkPosix) { 'rtk hook claude' } else { "$rtkPosix hook claude" }
+        $want = if (Install-RtkBashShim -RtkExe (Join-Path $up '.cargo\bin\rtk.exe')) { 'rtk hook claude' } else { "$rtkPosix hook claude" }
         $changed = $false
         $seen = @{}
         $kept = @()
@@ -1680,12 +1684,13 @@ function Invoke-RtkInitIfCommand {
   if (Test-AnyCmd $CommandNames) { & $RtkExe init -g @InitArgs *>&1 | Out-Null }
 }
 
-# Drop a tiny `rtk` shim into Git's usr\bin so the bare `rtk hook claude` form
-# resolves from Claude Code's Git-Bash hook shell (minimal PATH, no cargo dir).
-# The bare form is also the only one rtk's hook-detector recognizes, so this
-# avoids the "No hook installed" nag. Returns $true if the shim is in place.
+# Copy rtk.exe into Git's usr\bin so the bare `rtk hook claude` form resolves
+# from Claude Code's Git-Bash hook shell (minimal PATH, no cargo dir). The bare
+# form is also the only one rtk's hook-detector recognizes, so this avoids the
+# "No hook installed" nag. A real .exe, never an extensionless script, so Windows
+# never asks "Select an app to open 'rtk'". Returns $true if the shim is in place.
 function Install-RtkBashShim {
-  param([string]$RtkPosix)
+  param([string]$RtkExe)
   try {
     $gitCmd = Get-Command git.exe -ErrorAction Stop
     $dir = Split-Path -Parent $gitCmd.Source
@@ -1696,12 +1701,11 @@ function Install-RtkBashShim {
       $dir = Split-Path -Parent $dir
     }
     if (-not $usrBin) { return $false }
-    $shimPath = Join-Path $usrBin 'rtk'
-    $shimBody = "#!/usr/bin/bash`nexec '$RtkPosix' `"`$@`"`n"
-    $existing = if (Test-Path -LiteralPath $shimPath) { [System.IO.File]::ReadAllText($shimPath) } else { $null }
-    if ($existing -ne $shimBody) {
-      [System.IO.File]::WriteAllText($shimPath, $shimBody, (New-Object System.Text.UTF8Encoding($false)))
-    }
+    $legacy = Join-Path $usrBin 'rtk'
+    if (Test-Path -LiteralPath $legacy) { Remove-Item -LiteralPath $legacy -Force }
+    $shimPath = Join-Path $usrBin 'rtk.exe'
+    $same = (Test-Path -LiteralPath $shimPath) -and ((Get-FileHash -LiteralPath $shimPath).Hash -eq (Get-FileHash -LiteralPath $RtkExe).Hash)
+    if (-not $same) { try { Copy-Item -LiteralPath $RtkExe -Destination $shimPath -Force } catch { } }
     return (Test-Path -LiteralPath $shimPath)
   } catch { return $false }
 }
@@ -1746,7 +1750,7 @@ function Update-Rtk {
       if ($s.hooks -and $s.hooks.PreToolUse) {
         $up = $env:USERPROFILE
         $rtkPosix = '/' + $up.Substring(0,1).ToLower() + ($up.Substring(2) -replace '\\','/') + '/.cargo/bin/rtk.exe'
-        $want = if (Install-RtkBashShim -RtkPosix $rtkPosix) { 'rtk hook claude' } else { "$rtkPosix hook claude" }
+        $want = if (Install-RtkBashShim -RtkExe $rtk) { 'rtk hook claude' } else { "$rtkPosix hook claude" }
         $changed = $false
         $seen = @{}
         $kept = @()

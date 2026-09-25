@@ -1,4 +1,5 @@
 import ctypes
+import filecmp
 import glob
 import html
 import json
@@ -1325,12 +1326,13 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "  param([string]$RtkExe, [string[]]$CommandNames, [string[]]$InitArgs)",
         "  if (Test-AnyCmd $CommandNames) { & $RtkExe init -g @InitArgs *>&1 | Out-Null }",
         "}",
-        # Drop a tiny `rtk` shim into Git's usr\bin so the bare `rtk hook claude`
-        # form resolves from Claude Code's Git-Bash hook shell (minimal PATH, no
-        # cargo dir). The bare form is also the only one rtk's hook-detector
-        # recognizes, so this avoids the "No hook installed" nag.
+        # Copy rtk.exe into Git's usr\bin so the bare `rtk hook claude` form
+        # resolves from Claude Code's Git-Bash hook shell (minimal PATH, no cargo
+        # dir); rtk's hook-detector only recognizes the bare form. A real .exe,
+        # not an extensionless script, so Windows never asks "Select an app to
+        # open 'rtk'" when usr\bin is on the Windows PATH.
         "function Install-RtkBashShim {",
-        "  param([string]$RtkPosix)",
+        "  param([string]$RtkExe)",
         "  try {",
         "    $gitCmd = Get-Command git.exe -ErrorAction Stop",
         "    $dir = Split-Path -Parent $gitCmd.Source",
@@ -1341,11 +1343,11 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "      $dir = Split-Path -Parent $dir",
         "    }",
         "    if (-not $usrBin) { return $false }",
-        "    $shimPath = Join-Path $usrBin 'rtk'",
-        "    $lf = [char]0x0A; $q = [char]0x22",
-        "    $shimBody = '#!/usr/bin/bash' + $lf + 'exec ' + $RtkPosix + ' ' + $q + '$@' + $q + $lf",
-        "    $existing = if (Test-Path -LiteralPath $shimPath) { [System.IO.File]::ReadAllText($shimPath) } else { $null }",
-        "    if ($existing -ne $shimBody) { [System.IO.File]::WriteAllText($shimPath, $shimBody, (New-Object System.Text.UTF8Encoding($false))) }",
+        "    $legacy = Join-Path $usrBin 'rtk'",
+        "    if (Test-Path -LiteralPath $legacy) { Remove-Item -LiteralPath $legacy -Force }",
+        "    $shimPath = Join-Path $usrBin 'rtk.exe'",
+        "    $same = (Test-Path -LiteralPath $shimPath) -and ((Get-FileHash -LiteralPath $shimPath).Hash -eq (Get-FileHash -LiteralPath $RtkExe).Hash)",
+        "    if (-not $same) { try { Copy-Item -LiteralPath $RtkExe -Destination $shimPath -Force } catch { } }",
         "    return (Test-Path -LiteralPath $shimPath)",
         "  } catch { return $false }",
         "}",
@@ -1389,7 +1391,7 @@ def build_cli_auto_update_script(npm_exe: str, packages_file: str) -> str:
         "      if ($s.hooks -and $s.hooks.PreToolUse) {",
         "        $up = $env:USERPROFILE",
         "        $rtkPosix = '/' + $up.Substring(0,1).ToLower() + ($up.Substring(2) -replace '\\\\','/') + '/.cargo/bin/rtk.exe'",
-        "        $want = if (Install-RtkBashShim -RtkPosix $rtkPosix) { 'rtk hook claude' } else { \"$rtkPosix hook claude\" }",
+        "        $want = if (Install-RtkBashShim -RtkExe $rtkExe) { 'rtk hook claude' } else { \"$rtkPosix hook claude\" }",
         "        $changed = $false",
         "        $seen = @{}",
         "        $kept = @()",
@@ -3716,11 +3718,14 @@ def try_install_rtk(
     return (True, spec.package_candidates[0] if spec.package_candidates else "rtk")
 
 
-def _install_rtk_bash_shim(rtk_posix: str, log: Callable[[str], None]) -> bool:
-    """Drop a tiny `rtk` shim into Git's usr\\bin so the bare `rtk hook claude`
-    form resolves from Claude Code's Git-Bash hook shell (minimal PATH, no cargo
+def _install_rtk_bash_shim(rtk_exe: str, log: Callable[[str], None]) -> bool:
+    """Copy rtk.exe into Git's usr\\bin so the bare `rtk hook claude` form
+    resolves from Claude Code's Git-Bash hook shell (minimal PATH, no cargo
     dir). The bare form is also the only one rtk's hook-detector recognizes, so
     this avoids the "No hook installed" nag printed on every proxied command.
+    It is a real .exe, not an extensionless bash script: usr\\bin is often on
+    the Windows PATH too, and Windows shows "Select an app to open 'rtk'" when a
+    native tool resolves an extensionless file. Git Bash finds rtk.exe as `rtk`.
     Returns True if the shim is in place. git.exe may live in <Git>\\cmd,
     <Git>\\bin, or <Git>\\mingw64\\bin, so we walk up to the install root whose
     usr\\bin holds bash.exe -- that usr\\bin is exactly Git Bash's /usr/bin."""
@@ -3742,25 +3747,20 @@ def _install_rtk_bash_shim(rtk_posix: str, log: Callable[[str], None]) -> bool:
         directory = parent
     if not usr_bin:
         return False
-    shim_path = os.path.join(usr_bin, "rtk")
-    # LF-only bash script (newline="" keeps Windows from writing CRLF). The
-    # POSIX path is single-quoted: Windows profile paths can contain spaces,
-    # which would otherwise split the exec line and break the hook.
-    quoted_posix = "'" + rtk_posix + "'"
-    shim_body = f'#!/usr/bin/bash\nexec {quoted_posix} "$@"\n'
+    shim_path = os.path.join(usr_bin, "rtk.exe")
+    legacy_path = os.path.join(usr_bin, "rtk")
     try:
-        existing = None
-        if os.path.isfile(shim_path):
-            with open(shim_path, "r", encoding="utf-8", newline="") as fh:
-                existing = fh.read()
-        if existing != shim_body:
-            with open(shim_path, "w", encoding="utf-8", newline="") as fh:
-                fh.write(shim_body)
+        if os.path.isfile(legacy_path):
+            os.remove(legacy_path)
+            log(f"Removed extensionless rtk shim {legacy_path}")
+        if not (os.path.isfile(shim_path) and filecmp.cmp(rtk_exe, shim_path, shallow=False)):
+            shutil.copy2(rtk_exe, shim_path)
             log(f"Installed rtk Git-Bash shim at {shim_path}")
-        return os.path.isfile(shim_path)
+        return True
     except OSError as exc:
+        # A running rtk.exe locks the old copy; it still works until next time.
         log(f"Warning: could not install rtk Git-Bash shim: {exc}")
-        return False
+        return os.path.isfile(shim_path)
 
 
 def _windows_path_to_git_bash_posix(win_path: str) -> str:
@@ -3794,7 +3794,7 @@ def _normalize_claude_rtk_hook(log: Callable[[str], None]) -> None:
         return
     user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
     rtk_posix = _windows_path_to_git_bash_posix(user_profile) + "/.cargo/bin/rtk.exe"
-    if _install_rtk_bash_shim(rtk_posix, log):
+    if _install_rtk_bash_shim(os.path.join(user_profile, ".cargo", "bin", "rtk.exe"), log):
         want = "rtk hook claude"
     else:
         want = f"{rtk_posix} hook claude"

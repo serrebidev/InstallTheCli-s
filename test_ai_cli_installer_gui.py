@@ -4369,49 +4369,59 @@ class RtkIntegrationTests(unittest.TestCase):
                 # Non-rtk repo cache should be untouched.
                 self.assertTrue(os.path.isdir(os.path.join(checkouts, "other-xyz")))
 
-    def test_install_rtk_bash_shim_writes_lf_shim_in_git_usr_bin(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            # git.exe in <root>\mingw64\bin; bash.exe in <root>\usr\bin. The
-            # resolver must walk up past mingw64 to find the real usr\bin.
-            git_dir = os.path.join(tmp, "mingw64", "bin")
-            usr_bin = os.path.join(tmp, "usr", "bin")
-            os.makedirs(git_dir)
-            os.makedirs(usr_bin)
-            git_exe = os.path.join(git_dir, "git.exe")
-            open(git_exe, "w").close()
-            open(os.path.join(usr_bin, "bash.exe"), "w").close()
-            posix = "/c/Users/admin/.cargo/bin/rtk.exe"
-            with patch.object(m.shutil, "which", return_value=git_exe):
-                ok = m._install_rtk_bash_shim(posix, lambda _msg: None)
-            self.assertTrue(ok)
-            shim_path = os.path.join(usr_bin, "rtk")
-            with open(shim_path, "r", encoding="utf-8", newline="") as fh:
-                content = fh.read()
-            # The POSIX path is single-quoted so a Windows profile path with a
-            # space does not split the exec line.
-            self.assertEqual(content, "#!/usr/bin/bash\nexec '/c/Users/admin/.cargo/bin/rtk.exe' \"$@\"\n")
-            self.assertNotIn("\r", content, "shim must be LF-only for Git Bash")
+    def _fake_git_layout(self, tmp: str) -> tuple[str, str]:
+        # git.exe in <root>\mingw64\bin; bash.exe in <root>\usr\bin. The
+        # resolver must walk up past mingw64 to find the real usr\bin.
+        git_dir = os.path.join(tmp, "mingw64", "bin")
+        usr_bin = os.path.join(tmp, "usr", "bin")
+        os.makedirs(git_dir)
+        os.makedirs(usr_bin)
+        git_exe = os.path.join(git_dir, "git.exe")
+        open(git_exe, "w").close()
+        open(os.path.join(usr_bin, "bash.exe"), "w").close()
+        return git_exe, usr_bin
 
-    def test_install_rtk_bash_shim_quotes_a_posix_path_with_spaces(self) -> None:
+    def test_install_rtk_bash_shim_copies_rtk_exe_and_removes_extensionless_shim(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            git_dir = os.path.join(tmp, "mingw64", "bin")
-            usr_bin = os.path.join(tmp, "usr", "bin")
-            os.makedirs(git_dir)
-            os.makedirs(usr_bin)
-            git_exe = os.path.join(git_dir, "git.exe")
-            open(git_exe, "w").close()
-            open(os.path.join(usr_bin, "bash.exe"), "w").close()
+            git_exe, usr_bin = self._fake_git_layout(tmp)
+            rtk_exe = os.path.join(tmp, "rtk.exe")
+            with open(rtk_exe, "wb") as fh:
+                fh.write(b"MZ rtk v1")
+            # The old extensionless bash shim made Windows ask "Select an app
+            # to open 'rtk'"; it must be replaced by a real rtk.exe copy.
+            with open(os.path.join(usr_bin, "rtk"), "w", encoding="utf-8") as fh:
+                fh.write("#!/usr/bin/bash\nexec rtk.exe\n")
+            logs: list[str] = []
             with patch.object(m.shutil, "which", return_value=git_exe):
-                m._install_rtk_bash_shim("/c/Users/John Smith/.cargo/bin/rtk.exe", lambda _msg: None)
-            with open(os.path.join(usr_bin, "rtk"), "r", encoding="utf-8", newline="") as fh:
-                content = fh.read()
-            self.assertEqual(
-                content, "#!/usr/bin/bash\nexec '/c/Users/John Smith/.cargo/bin/rtk.exe' \"$@\"\n"
-            )
+                self.assertTrue(m._install_rtk_bash_shim(rtk_exe, logs.append))
+                self.assertFalse(os.path.exists(os.path.join(usr_bin, "rtk")))
+                with open(os.path.join(usr_bin, "rtk.exe"), "rb") as fh:
+                    self.assertEqual(fh.read(), b"MZ rtk v1")
+                # Unchanged binary: no second copy.
+                logs.clear()
+                self.assertTrue(m._install_rtk_bash_shim(rtk_exe, logs.append))
+                self.assertEqual(logs, [])
+                # Rebuilt rtk: the copy is refreshed.
+                with open(rtk_exe, "wb") as fh:
+                    fh.write(b"MZ rtk v2")
+                self.assertTrue(m._install_rtk_bash_shim(rtk_exe, logs.append))
+                with open(os.path.join(usr_bin, "rtk.exe"), "rb") as fh:
+                    self.assertEqual(fh.read(), b"MZ rtk v2")
+
+    def test_install_rtk_bash_shim_keeps_existing_copy_when_copy_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            git_exe, usr_bin = self._fake_git_layout(tmp)
+            missing = os.path.join(tmp, "no-rtk.exe")
+            logs: list[str] = []
+            with patch.object(m.shutil, "which", return_value=git_exe):
+                self.assertFalse(m._install_rtk_bash_shim(missing, logs.append))
+                self.assertTrue(any("could not install" in line for line in logs))
+                open(os.path.join(usr_bin, "rtk.exe"), "wb").close()
+                self.assertTrue(m._install_rtk_bash_shim(missing, logs.append))
 
     def test_install_rtk_bash_shim_returns_false_without_git(self) -> None:
         with patch.object(m.shutil, "which", return_value=None):
-            self.assertFalse(m._install_rtk_bash_shim("/c/x/rtk.exe", lambda _msg: None))
+            self.assertFalse(m._install_rtk_bash_shim("C:\\x\\rtk.exe", lambda _msg: None))
 
     def test_normalize_claude_hook_uses_bare_form_when_shim_installed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5277,9 +5287,14 @@ class AuditFixScriptTests(unittest.TestCase):
         windows = self._read("install_all_windows.ps1")
         self.assertIn("if ((Test-Cmd 'vibe') -or (Test-Cmd 'mistral-vibe')) {", windows)
         self.assertIn("Mistral Vibe is not installed; skipping.", windows)
-        # Both shim copies must quote the POSIX path (profile paths can contain
-        # spaces, which would otherwise split the exec line).
-        self.assertEqual(windows.count("exec '$RtkPosix'"), 2)
+        # Both shim copies install a real rtk.exe and delete the extensionless
+        # script that made Windows ask "Select an app to open 'rtk'".
+        self.assertEqual(windows.count("$shimPath = Join-Path $usrBin 'rtk.exe'"), 2)
+        self.assertEqual(windows.count("$legacy = Join-Path $usrBin 'rtk'"), 2)
+        self.assertNotIn("#!/usr/bin/bash`nexec", windows)
+        generated = m.build_cli_auto_update_script("npm.cmd", "C:\\packages.txt")
+        self.assertIn("$shimPath = Join-Path $usrBin 'rtk.exe'", generated)
+        self.assertIn("Install-RtkBashShim -RtkExe $rtkExe", generated)
 
     def test_generated_windows_updater_gates_claude_on_the_marker(self) -> None:
         # The hidden task used to install Claude unconditionally on any machine
