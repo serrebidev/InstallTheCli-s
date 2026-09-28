@@ -1,5 +1,4 @@
 import ctypes
-import filecmp
 import glob
 import html
 import json
@@ -3803,7 +3802,7 @@ def _install_rtk_bash_shim(rtk_exe: str, log: Callable[[str], None]) -> bool:
         if os.path.isfile(legacy_path):
             os.remove(legacy_path)
             log(f"Removed extensionless rtk shim {legacy_path}")
-        if not (os.path.isfile(shim_path) and filecmp.cmp(rtk_exe, shim_path, shallow=False)):
+        if not (os.path.isfile(shim_path) and _same_file_contents(rtk_exe, shim_path)):
             shutil.copy2(rtk_exe, shim_path)
             log(f"Installed rtk Git-Bash shim at {shim_path}")
         return True
@@ -3811,6 +3810,25 @@ def _install_rtk_bash_shim(rtk_exe: str, log: Callable[[str], None]) -> bool:
         # A running rtk.exe locks the old copy; it still works until next time.
         log(f"Warning: could not install rtk Git-Bash shim: {exc}")
         return os.path.isfile(shim_path)
+
+
+def _same_file_contents(path_a: str, path_b: str) -> bool:
+    """Byte-compare two files. filecmp.cmp's stat-signature cache can report
+    stale equality when a file is rewritten between rapid successive calls,
+    which made the rtk shim refresh test flaky on CI."""
+    try:
+        if os.path.getsize(path_a) != os.path.getsize(path_b):
+            return False
+        with open(path_a, "rb") as fa, open(path_b, "rb") as fb:
+            while True:
+                chunk_a = fa.read(65536)
+                chunk_b = fb.read(65536)
+                if chunk_a != chunk_b:
+                    return False
+                if not chunk_a:
+                    return True
+    except OSError:
+        return False
 
 
 def _windows_path_to_git_bash_posix(win_path: str) -> str:
