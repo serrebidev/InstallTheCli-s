@@ -251,7 +251,7 @@ if ($npmExe) {
     Say "Installing @openai/codex via npm..."
     & $npmExe install -g '@openai/codex' --no-fund --no-audit 2>&1 | ForEach-Object { Say "  $_" }
 } else {
-    Say "npm unavailable - install Node.js 22 LTS from https://nodejs.org, then re-run."
+    Say "npm unavailable - install Node.js 24 LTS from https://nodejs.org, then re-run."
 }
 
 # ---------------------------------------------------------------------------
