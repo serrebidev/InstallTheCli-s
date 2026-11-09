@@ -7,6 +7,11 @@ on:
   pull_request:
     branches: [master]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to build macOS for and attach to (blank = build only)
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -23,6 +28,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Set up Python 3.14
         uses: actions/setup-python@v7
@@ -111,15 +118,25 @@ jobs:
             dist/InstallTheCli-macos-SHA256SUMS.txt
           if-no-files-found: error
 
-      - name: Attach macOS artifact to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Attach macOS artifact to the Forgejo release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
           RELEASE_ZIP="dist/InstallTheCli-${TAG}-macos.zip"
           RELEASE_SUMS="dist/InstallTheCli-${TAG}-macos-SHA256SUMS.txt"
           mv "dist/${{ steps.package.outputs.artifact }}" "$RELEASE_ZIP"
           shasum -a 256 "$RELEASE_ZIP" > "$RELEASE_SUMS"
-          gh release upload "$TAG" "$RELEASE_ZIP" "$RELEASE_SUMS" --clobber
+          api="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY"
+          h="Authorization: token $FORGEJO_TOKEN"
+          release="$(curl -sf -H "$h" "$api/releases/tags/$TAG")"
+          id="$(echo "$release" | jq -r .id)"
+          for file in "$RELEASE_ZIP" "$RELEASE_SUMS"; do
+            name="$(basename "$file")"
+            old="$(echo "$release" | jq -r --arg n "$name" '.assets[] | select(.name == $n) | .id')"
+            [ -z "$old" ] || curl -sf -X DELETE -H "$h" "$api/releases/$id/assets/$old"
+            curl -sf -o /dev/null -H "$h" -F "attachment=@$file" "$api/releases/$id/assets?name=$name"
+            echo "Attached $name to $TAG"
+          done
