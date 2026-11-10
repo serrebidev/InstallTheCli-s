@@ -129,7 +129,7 @@ REM upload their assets to. If publish fails, no remote tag is left behind.
 exit /b 0
 
 :build_linux_over_ssh
-if not defined LINUX_BUILD_HOST set "LINUX_BUILD_HOST=root@serrebiradio.com"
+if not defined LINUX_BUILD_HOST set "LINUX_BUILD_HOST=wsl-build"
 echo [release] Building Linux on %LINUX_BUILD_HOST% over SSH...
 ssh -o BatchMode=yes %LINUX_BUILD_HOST% bash -s -- v%NEXT_VERSION% < "%~dp0tools\build_linux_remote.sh" > "%RELEASE_DIR%\linux_remote_dir.txt" || exit /b 1
 set "LINUX_REMOTE_DIR="
