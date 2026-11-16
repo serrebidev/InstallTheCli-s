@@ -5,3 +5,12 @@ InstallTheCli exists because AI CLIs and desktop AI apps ship as fifteen separat
 Every tool this installer installs (Claude Code, Codex, the Antigravity apps, VS Code, Grok, Qwen, GitHub Copilot, Freebuff, Mistral Vibe, Ollama, RTK, Claudio, the GUI apps, and the Node.js/Python/Homebrew prerequisites) belongs to its own project. This installer only puts them on your machine and keeps them current.
 
 Questions and bug reports are welcome in the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects). More serrebi projects: [projects.serrebiradio.com](https://projects.serrebiradio.com).
+
+
+## About this project
+
+- GitHub profile: [serrebidev](https://github.com/serrebidev)
+- Repository (GitHub): [https://github.com/serrebidev/InstallTheCli-s](https://github.com/serrebidev/InstallTheCli-s)
+- Repository (Forgejo): [https://git.serrebiradio.com/serrebi/InstallTheCli-s](https://git.serrebiradio.com/serrebi/InstallTheCli-s)
+- Projects site: [projects.serrebiradio.com](https://projects.serrebiradio.com)
+- Questions and bug reports: [SerrebiProjects Telegram group](https://t.me/SerrebiProjects)
