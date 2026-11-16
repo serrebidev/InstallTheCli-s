@@ -155,7 +155,7 @@ set "LINUX_REMOTE_DIR="
 for /f "usebackq delims=" %%D in ("%RELEASE_DIR%\linux_remote_dir.txt") do set "LINUX_REMOTE_DIR=%%D"
 if not defined LINUX_REMOTE_DIR exit /b 1
 scp -o BatchMode=yes "%LINUX_BUILD_HOST%:%LINUX_REMOTE_DIR%/*" "%RELEASE_DIR%\." || exit /b 1
-ssh -o BatchMode=yes %LINUX_BUILD_HOST% "rm -rf -- %LINUX_REMOTE_DIR%/.."
+ssh -o BatchMode=yes %LINUX_BUILD_HOST% "rm -rf -- \"$(dirname %LINUX_REMOTE_DIR%)\""
 for %%F in ("%RELEASE_DIR%\InstallTheCli-v%NEXT_VERSION%-linux.tar.gz" "%RELEASE_DIR%\InstallTheCli-v%NEXT_VERSION%-linux-SHA256SUMS.txt") do (
     py -3.14 "%~dp0tools\forgejo_release.py" upload "v%NEXT_VERSION%" "%%~F" || exit /b 1
 )
