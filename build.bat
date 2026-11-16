@@ -28,7 +28,11 @@ if /I "%MODE%"=="build" (
 )
 
 where git >nul 2>&1 || (echo [release] Git not found in PATH.& goto :error)
-where gh >nul 2>&1 || (echo [release] GitHub CLI ^(gh^) not found in PATH.& goto :error)
+if defined GITHUB_ACTIONS (
+    where gh >nul 2>&1 || (echo [release] GitHub CLI ^(gh^) not found in PATH.& goto :error)
+) else (
+    if "%FORGEJO_TOKEN%"=="" (echo [release] FORGEJO_TOKEN is not set.& goto :error)
+)
 
 git fetch --tags >nul 2>&1
 call :compute_next_version || goto :error
@@ -101,11 +105,17 @@ set "SUMS_PATH=%RELEASE_DIR%\%APP_NAME%-v%NEXT_VERSION%-SHA256SUMS.txt"
 powershell -NoProfile -Command "Get-ChildItem -LiteralPath '%RELEASE_DIR%' -File | Sort-Object Name | ForEach-Object { '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant(), $_.Name } | Set-Content -LiteralPath '%SUMS_PATH%' -Encoding ascii"
 if errorlevel 1 exit /b 1
 set "NOTES_PATH=%RELEASE_DIR%\release-notes-v%NEXT_VERSION%.md"
+set "PREV_TAG="
+for /f "delims=" %%T in ('git describe --tags --abbrev^=0 HEAD 2^>nul') do set "PREV_TAG=%%T"
 (
     echo ## %APP_NAME% v%NEXT_VERSION%
     echo.
-    echo - Built with build.bat release.
 ) > "%NOTES_PATH%"
+if defined PREV_TAG (
+    git log --no-merges --format="- %%s" "%PREV_TAG%..HEAD" >> "%NOTES_PATH%"
+) else (
+    echo - Built with build.bat release.>> "%NOTES_PATH%"
+)
 exit /b 0
 
 :tag_and_push
@@ -122,7 +132,16 @@ set "REL_SHA="
 for /f "delims=" %%C in ('git rev-parse HEAD') do set "REL_SHA=%%C"
 if not defined REL_SHA (echo [release] Could not resolve HEAD commit.& exit /b 1)
 git push origin HEAD || exit /b 1
-REM NOTE: we deliberately do NOT push the tag here. gh release create creates
+REM This host publishes on Forgejo (GitHub is suspended): push the tag now and
+REM create the release on it right after in :publish_release. The macOS build
+REM the tag starts needs several minutes before it attaches, so the release is
+REM there by then.
+if not defined GITHUB_ACTIONS (
+    git tag "v%NEXT_VERSION%" "%REL_SHA%" || exit /b 1
+    git push origin "v%NEXT_VERSION%" || exit /b 1
+    exit /b 0
+)
+REM NOTE (GitHub runner path): we deliberately do NOT push the tag here. gh release create creates
 REM the tag (at REL_SHA) together with the release in :publish_release, so the
 REM tag never appears on origin without a release for the CI workflows to
 REM upload their assets to. If publish fails, no remote tag is left behind.
@@ -137,7 +156,9 @@ for /f "usebackq delims=" %%D in ("%RELEASE_DIR%\linux_remote_dir.txt") do set "
 if not defined LINUX_REMOTE_DIR exit /b 1
 scp -o BatchMode=yes "%LINUX_BUILD_HOST%:%LINUX_REMOTE_DIR%/*" "%RELEASE_DIR%\." || exit /b 1
 ssh -o BatchMode=yes %LINUX_BUILD_HOST% "rm -rf -- %LINUX_REMOTE_DIR%/.."
-gh release upload "v%NEXT_VERSION%" "%RELEASE_DIR%\InstallTheCli-v%NEXT_VERSION%-linux.tar.gz" "%RELEASE_DIR%\InstallTheCli-v%NEXT_VERSION%-linux-SHA256SUMS.txt" --repo "%GITHUB_REPO_SLUG%" --clobber || exit /b 1
+for %%F in ("%RELEASE_DIR%\InstallTheCli-v%NEXT_VERSION%-linux.tar.gz" "%RELEASE_DIR%\InstallTheCli-v%NEXT_VERSION%-linux-SHA256SUMS.txt") do (
+    py -3.14 "%~dp0tools\forgejo_release.py" upload "v%NEXT_VERSION%" "%%~F" || exit /b 1
+)
 echo [release] Linux artifact attached to v%NEXT_VERSION%.
 exit /b 0
 
@@ -148,6 +169,19 @@ for %%W in (linux-build.yml macos-build.yml) do (
 exit /b 0
 
 :publish_release
+if not defined GITHUB_ACTIONS (
+    echo [release] Creating Forgejo release v%NEXT_VERSION%...
+    py -3.14 "%~dp0tools\forgejo_release.py" create "v%NEXT_VERSION%" ^
+        --title "%APP_NAME% v%NEXT_VERSION%" ^
+        --notes-file "%NOTES_PATH%" ^
+        --asset "%RELEASE_DIR%\%APP_NAME%-v%NEXT_VERSION%.exe" ^
+        --asset "%RELEASE_DIR%\%APP_NAME%-v%NEXT_VERSION%.zip" ^
+        --asset "%SUMS_PATH%" ^
+        --asset "%RELEASE_DIR%\install_all_windows.ps1" ^
+        --asset "%RELEASE_DIR%\install_all_macos.sh" ^
+        --asset "%RELEASE_DIR%\install_all_linux.sh" || exit /b 1
+    exit /b 0
+)
 echo [release] Creating GitHub release v%NEXT_VERSION%...
 gh release create "v%NEXT_VERSION%" ^
     "%RELEASE_DIR%\%APP_NAME%-v%NEXT_VERSION%.exe" ^

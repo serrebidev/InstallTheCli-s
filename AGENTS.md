@@ -34,6 +34,11 @@ You should not need to open `build.bat` to cut a release — everything operatio
 - Release from `master`; `master` is the default branch.
 - When it exits 0, the release is published as Latest/non-draft, the Windows and Linux
   assets are attached; the macOS workflow attaches its own.
+- GitHub is suspended: on this host `build.bat release` publishes on Forgejo through
+  `tools/forgejo_release.py` (needs `FORGEJO_TOKEN`). It pushes the tag, creates the
+  release on it, and the tag push starts `macos-build.yml` on the Forgejo Mac runner.
+  The `gh` steps described below run only on the GitHub-runner path (`GITHUB_ACTIONS`).
+  Run it as `.\build.bat release`: this shell sets `NoDefaultCurrentDirectoryInExePath`.
 
 ### Cloud path (Muse agent and cloud agents ONLY)
 - On this Windows host always use `.\build.bat release`: Windows builds locally, the tag push starts `macos-build.yml` (macOS on a GitHub runner), and Linux builds over `ssh wsl-build` (local WSL Ubuntu, Docker) with `tools/build_linux_remote.sh` (throwaway ubuntu:24.04 container; `LINUX_BUILD_HOST` overrides), then uploads. `linux-build.yml` still tests the tag but attaches only when dispatched (the cloud path). Never use cloud-release.yml from this host.
