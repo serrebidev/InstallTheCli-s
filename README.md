@@ -6,6 +6,8 @@ A vibe-coded, set-it-and-forget-it installer for Windows, macOS, and Linux that 
 
 **Questions, bugs, or release news?** Join the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects), the fastest place to get help.
 
+More serrebi projects: [projects.serrebiradio.com](https://projects.serrebiradio.com)
+
 ## Features
 
 - Installs fifteen AI CLIs: Command Code (`cmd`, detected as `cmdc` so it never collides with Windows' own `cmd.exe`), Claude, Codex, Antigravity 2.0, Antigravity CLI (`agy`), Antigravity IDE, Visual Studio Code, Grok, Qwen, GitHub Copilot, Freebuff, Mistral Vibe, Ollama, RTK (Rust Token Killer, built from `rtk-ai/rtk` git master via cargo), and Claudio (agent sounds).
@@ -114,3 +116,7 @@ Pull requests are welcome. If InstallTheCli has been useful to you, open a PR wi
 ## Community and support
 
 Report bugs and request features in [Issues](https://github.com/serrebidev/InstallTheCli-s/issues). For questions, feedback, and release news, join the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects).
+
+## Credits
+
+See [CREDITS.md](CREDITS.md) for where the ideas behind this project came from, and the third-party projects it builds on.
