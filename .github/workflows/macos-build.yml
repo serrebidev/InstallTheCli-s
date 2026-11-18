@@ -110,7 +110,7 @@ jobs:
           echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
 
       - name: Upload macOS build artifact
-        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        uses: actions/upload-artifact@v4
         with:
           name: InstallTheCli-macos
           path: |
@@ -129,7 +129,7 @@ jobs:
           RELEASE_SUMS="dist/InstallTheCli-${TAG}-macos-SHA256SUMS.txt"
           mv "dist/${{ steps.package.outputs.artifact }}" "$RELEASE_ZIP"
           shasum -a 256 "$RELEASE_ZIP" > "$RELEASE_SUMS"
-          api="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY"
+          api="https://git.serrebiradio.com/api/v1/repos/serrebi/InstallTheCli-s"
           h="Authorization: token $FORGEJO_TOKEN"
           release="$(curl -sf -H "$h" "$api/releases/tags/$TAG")"
           id="$(echo "$release" | jq -r .id)"
