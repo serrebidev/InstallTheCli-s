@@ -1,8 +1,8 @@
 name: Cloud Release
 
-# Muse agent and cloud agents ONLY. On the Windows release host run `.\build.bat release`.
+# Every public release runs here, on GitHub runners.
 # Windows runs the same build.bat on a GitHub runner (version, assets, tag,
-# Latest release). Because a GITHUB_TOKEN tag starts no workflows, build.bat
+# Forgejo release). Because a GITHUB_TOKEN tag starts no workflows, build.bat
 # dispatches linux-build.yml and macos-build.yml on the new tag when
 # GITHUB_ACTIONS is set, then gates on the Linux asset exactly as locally.
 #
@@ -66,9 +66,17 @@ jobs:
           call build.bat dry-run || exit /b 1
           call build.bat build
 
+      - name: Add the Forgejo remote
+        if: ${{ !inputs.dry_run }}
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: git remote add forgejo "https://x-access-token:$env:FORGEJO_TOKEN@git.serrebiradio.com/serrebi/InstallTheCli-s.git"
+
       - name: Release
         if: ${{ !inputs.dry_run }}
         shell: cmd
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
         run: call build.bat release
 
       - uses: actions/upload-artifact@v7

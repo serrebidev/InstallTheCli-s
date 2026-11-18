@@ -1,11 +1,8 @@
 name: macOS Build
 
+# Manual only: the Forgejo-to-GitHub sync disables GitHub workflows with
+# automatic triggers.
 on:
-  push:
-    branches: [master]
-    tags: ['v*']
-  pull_request:
-    branches: [master]
   workflow_dispatch:
     inputs:
       release_tag:

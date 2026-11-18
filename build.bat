@@ -30,16 +30,15 @@ if /I "%MODE%"=="build" (
 where git >nul 2>&1 || (echo [release] Git not found in PATH.& goto :error)
 if defined GITHUB_ACTIONS (
     where gh >nul 2>&1 || (echo [release] GitHub CLI ^(gh^) not found in PATH.& goto :error)
-) else (
-    if "%FORGEJO_TOKEN%"=="" (echo [release] FORGEJO_TOKEN is not set.& goto :error)
 )
+if /I "%MODE%"=="release" if "%FORGEJO_TOKEN%"=="" (echo [release] FORGEJO_TOKEN is not set.& goto :error)
 
 git fetch --tags >nul 2>&1
 call :compute_next_version || goto :error
 
 if /I "%MODE%"=="dry-run" (
     echo [dry-run] Next version: v%NEXT_VERSION%
-    echo [dry-run] Would run build_exe.bat, package release assets, tag, push, and publish the GitHub release as Latest.
+    echo [dry-run] Would run build_exe.bat, package release assets, tag, push, and publish the Forgejo release.
     popd
     exit /b 0
 )
@@ -132,19 +131,13 @@ set "REL_SHA="
 for /f "delims=" %%C in ('git rev-parse HEAD') do set "REL_SHA=%%C"
 if not defined REL_SHA (echo [release] Could not resolve HEAD commit.& exit /b 1)
 git push origin HEAD || exit /b 1
-REM This host publishes on Forgejo (GitHub is suspended): push the tag now and
-REM create the release on it right after in :publish_release. The macOS build
-REM the tag starts needs several minutes before it attaches, so the release is
-REM there by then.
-if not defined GITHUB_ACTIONS (
-    git tag "v%NEXT_VERSION%" "%REL_SHA%" || exit /b 1
-    git push origin "v%NEXT_VERSION%" || exit /b 1
-    exit /b 0
+REM Forgejo holds the releases: the tag goes to both remotes before the release is created.
+git tag "v%NEXT_VERSION%" "%REL_SHA%" || exit /b 1
+git push origin "v%NEXT_VERSION%" || exit /b 1
+if defined GITHUB_ACTIONS (
+    git push forgejo "%REL_SHA%:refs/heads/master" || exit /b 1
+    git push forgejo "v%NEXT_VERSION%" || exit /b 1
 )
-REM NOTE (GitHub runner path): we deliberately do NOT push the tag here. gh release create creates
-REM the tag (at REL_SHA) together with the release in :publish_release, so the
-REM tag never appears on origin without a release for the CI workflows to
-REM upload their assets to. If publish fails, no remote tag is left behind.
 exit /b 0
 
 :build_linux_over_ssh
@@ -169,51 +162,23 @@ for %%W in (linux-build.yml macos-build.yml) do (
 exit /b 0
 
 :publish_release
-if not defined GITHUB_ACTIONS (
-    echo [release] Creating Forgejo release v%NEXT_VERSION%...
-    py -3.14 "%~dp0tools\forgejo_release.py" create "v%NEXT_VERSION%" ^
-        --title "%APP_NAME% v%NEXT_VERSION%" ^
-        --notes-file "%NOTES_PATH%" ^
-        --asset "%RELEASE_DIR%\%APP_NAME%-v%NEXT_VERSION%.exe" ^
-        --asset "%RELEASE_DIR%\%APP_NAME%-v%NEXT_VERSION%.zip" ^
-        --asset "%SUMS_PATH%" ^
-        --asset "%RELEASE_DIR%\install_all_windows.ps1" ^
-        --asset "%RELEASE_DIR%\install_all_macos.sh" ^
-        --asset "%RELEASE_DIR%\install_all_linux.sh" || exit /b 1
-    exit /b 0
-)
-echo [release] Creating GitHub release v%NEXT_VERSION%...
-gh release create "v%NEXT_VERSION%" ^
-    "%RELEASE_DIR%\%APP_NAME%-v%NEXT_VERSION%.exe" ^
-    "%RELEASE_DIR%\%APP_NAME%-v%NEXT_VERSION%.zip" ^
-    "%SUMS_PATH%" ^
-    "%RELEASE_DIR%\install_all_windows.ps1" ^
-    "%RELEASE_DIR%\install_all_macos.sh" ^
-    "%RELEASE_DIR%\install_all_linux.sh" ^
-    --repo "%GITHUB_REPO_SLUG%" ^
-    --target "%REL_SHA%" ^
+set "FORGEJO_PY=py -3.14"
+if defined GITHUB_ACTIONS set "FORGEJO_PY=python"
+echo [release] Creating Forgejo release v%NEXT_VERSION%...
+%FORGEJO_PY% "%~dp0tools\forgejo_release.py" create "v%NEXT_VERSION%" ^
     --title "%APP_NAME% v%NEXT_VERSION%" ^
     --notes-file "%NOTES_PATH%" ^
-    --latest
-if errorlevel 1 exit /b 1
-gh release edit "v%NEXT_VERSION%" --repo "%GITHUB_REPO_SLUG%" --draft=false --latest
-if errorlevel 1 (
-    echo [release] Failed to publish v%NEXT_VERSION% as Latest.
-    exit /b 1
-)
-REM Confirm the just-published release ended up non-draft + Latest. If
-REM gh's create/edit reported success but the API still shows draft,
-REM force-publish once more and re-check. Never touch any other release.
-powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $repo='%GITHUB_REPO_SLUG%'; $current='v%NEXT_VERSION%'; $info = gh release view $current --repo $repo --json isDraft,url | ConvertFrom-Json; if ($info.isDraft) { Write-Host ('Re-publishing draft ' + $current + ' as Latest...'); gh release edit $current --repo $repo --draft=false --latest | Out-Null; $info = gh release view $current --repo $repo --json isDraft,url | ConvertFrom-Json; if ($info.isDraft) { throw ('release ' + $current + ' still marked draft after retry') } }; Write-Host ('Final release URL: ' + $info.url)"
-if errorlevel 1 (
-    echo [release] Failed to confirm v%NEXT_VERSION% is published as Latest.
-    exit /b 1
-)
+    --asset "%RELEASE_DIR%\%APP_NAME%-v%NEXT_VERSION%.exe" ^
+    --asset "%RELEASE_DIR%\%APP_NAME%-v%NEXT_VERSION%.zip" ^
+    --asset "%SUMS_PATH%" ^
+    --asset "%RELEASE_DIR%\install_all_windows.ps1" ^
+    --asset "%RELEASE_DIR%\install_all_macos.sh" ^
+    --asset "%RELEASE_DIR%\install_all_linux.sh" || exit /b 1
 exit /b 0
 
 REM Wait for the Linux remote build (.github/workflows/linux-build.yml)
 REM to finish on the just-pushed tag, then confirm its artifact landed on
-REM the GitHub release. Windows/macOS binaries are produced elsewhere
+REM the Forgejo release. Windows/macOS binaries are produced elsewhere
 REM (this script for Windows, the macOS workflow auto-attaches macOS), so
 REM only Linux is gated here. The tag push in :tag_and_push is what fires
 REM the workflow; by the time we get here, it's mid-build.
@@ -261,7 +226,7 @@ if /I not "%LINUX_CONCLUSION%"=="success" (
     exit /b 1
 )
 echo [release] Linux build succeeded. Verifying release asset...
-gh release view "v%NEXT_VERSION%" --repo "%GITHUB_REPO_SLUG%" --json assets --jq ".assets[].name" | findstr /I /C:"-linux.tar.gz" >nul
+powershell -NoProfile -Command "$r = Invoke-RestMethod -Uri 'https://git.serrebiradio.com/api/v1/repos/serrebi/InstallTheCli-s/releases/tags/v%NEXT_VERSION%' -Headers @{ Authorization = 'token ' + $env:FORGEJO_TOKEN }; if (-not ($r.assets.name -like '*-linux.tar.gz')) { exit 1 }"
 if errorlevel 1 (
     echo [release] WARNING: No Linux tarball found on release v%NEXT_VERSION% - build succeeded but upload may have failed.
     exit /b 1

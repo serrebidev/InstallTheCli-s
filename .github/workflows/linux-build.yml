@@ -1,11 +1,8 @@
 name: Linux Build
 
+# Manual only: the Forgejo-to-GitHub sync disables GitHub workflows with
+# automatic triggers.
 on:
-  push:
-    branches: [master]
-    tags: ['v*']
-  pull_request:
-    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -125,12 +122,10 @@ jobs:
             dist/InstallTheCli-linux-SHA256SUMS.txt
           if-no-files-found: error
 
-      # Only cloud-release.yml's dispatch attaches; a host release builds
-      # Linux over SSH (tools/build_linux_remote.sh) and its tag push only tests.
-      - name: Attach Linux artifact to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'workflow_dispatch'
+      - name: Attach Linux artifact to the Forgejo release
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
@@ -138,4 +133,13 @@ jobs:
           RELEASE_SUMS="dist/InstallTheCli-${TAG}-linux-SHA256SUMS.txt"
           mv "dist/${{ steps.package.outputs.artifact }}" "$RELEASE_TGZ"
           sha256sum "$RELEASE_TGZ" > "$RELEASE_SUMS"
-          gh release upload "$TAG" "$RELEASE_TGZ" "$RELEASE_SUMS" --clobber
+          api="https://git.serrebiradio.com/api/v1/repos/serrebi/InstallTheCli-s"
+          h="Authorization: token $FORGEJO_TOKEN"
+          release="$(curl -sf -H "$h" "$api/releases/tags/$TAG")"
+          id="$(echo "$release" | jq -r .id)"
+          for file in "$RELEASE_TGZ" "$RELEASE_SUMS"; do
+            name="$(basename "$file")"
+            old="$(echo "$release" | jq -r --arg n "$name" '.assets[] | select(.name == $n) | .id')"
+            [ -z "$old" ] || curl -sf -X DELETE -H "$h" "$api/releases/$id/assets/$old"
+            curl -sf -o /dev/null -H "$h" -F "attachment=@$file" "$api/releases/$id/assets?name=$name"
+          done
