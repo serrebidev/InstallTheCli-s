@@ -5248,6 +5248,7 @@ class InstallerFrame(wx.Frame):
         self._persistent_log_write_warning_shown = False
         self._reset_persistent_log_for_new_run()
         self._build_ui()
+        self._build_menu()
         self.Centre()
         # Auto-upgrade an existing hidden auto-update task to the current
         # updater logic. This is fully automatic on app open: if the user
@@ -5492,6 +5493,25 @@ class InstallerFrame(wx.Frame):
         install_apps_btn = getattr(self, "install_btn", None)
         if install_apps_btn is not None:
             install_apps_btn.SetLabel("&Uninstall All Apps" if self._all_gui_apps_installed() else "Install Apps &All")
+
+    def _build_menu(self) -> None:  # pragma: no cover
+        """Help > Report an issue on GitHub."""
+        from about_dialog import report_issue
+
+        help_menu = wx.Menu()
+        item = help_menu.Append(
+            wx.ID_ANY,
+            "Report an &issue on GitHub...",
+            "Describe a problem or an idea, then send it as a GitHub issue",
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: report_issue(self, "serrebidev/InstallTheCli-s", "InstallTheCli"),
+            item,
+        )
+        menubar = wx.MenuBar()
+        menubar.Append(help_menu, "&Help")
+        self.SetMenuBar(menubar)
 
     def on_close(self, _event: wx.CommandEvent) -> None:
         if self.worker_thread and self.worker_thread.is_alive():

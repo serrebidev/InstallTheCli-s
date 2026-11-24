@@ -5355,3 +5355,13 @@ class ClaudioIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main(verbosity=2)
+
+
+def test_issue_url_carries_title_body_and_app():
+    import about_dialog
+
+    url = about_dialog.issue_url("serrebidev/InstallTheCli-s", "Photo & video", "Line 1", "InstallTheCli")
+    assert url.startswith(
+        "https://github.com/serrebidev/InstallTheCli-s/issues/new?title=Photo%20%26%20video&body=Line%201%0A"
+    )
+    assert "%0A---%0AInstallTheCli%20on%20" in url
